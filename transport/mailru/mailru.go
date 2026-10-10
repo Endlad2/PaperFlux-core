@@ -29,7 +29,10 @@ import (
 	"universal-bypass-tool/utils"
 )
 
-const mailruUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+// Use one agent for metadata and WebSocket requests. The current gateway
+// rejects a Go WebSocket with the former Chrome agent (HTTP 409); Firefox
+// works in the upstream fix and our owner-only handshake matrix.
+const mailruUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0"
 
 var cursorPayloadRe = regexp.MustCompile(`"cursor":"[^;]+;([^"]+)"`)
 
