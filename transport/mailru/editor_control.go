@@ -3,6 +3,9 @@ package mailru
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"github.com/gorilla/websocket"
+	"io"
 	"strings"
 )
 
@@ -10,10 +13,26 @@ import (
 // memory bound without the old 256 KiB control / 4 MiB WebSocket cutoffs.
 const maxMailruEditorFrameBytes = 64 << 20
 
+// gorilla's wire ReadLimit does not bound the DECOMPRESSED message size.
+// Bound NextReader too, so negotiated compression cannot inflate into an
+// unbounded io.ReadAll allocation (including during Engine.IO handshake).
+func readMailruFrame(conn *websocket.Conn, limit int64) (int, []byte, error) {
+	kind, reader, err := conn.NextReader()
+	if err != nil {
+		return kind, nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err == nil && int64(len(data)) > limit {
+		return kind, nil, fmt.Errorf("mailru: editor frame exceeds decompressed limit")
+	}
+	return kind, data, err
+}
+
 type mailruEditorEvent struct {
-	Type   string `json:"type"`
-	Result *int   `json:"result"`
-	Code   int    `json:"code"`
+	Type     string `json:"type"`
+	Result   *int   `json:"result"`
+	Code     int    `json:"code"`
+	WaitAuth bool   `json:"waitAuth"`
 }
 
 func parseMailruEditorEvent(data []byte) mailruEditorEvent {

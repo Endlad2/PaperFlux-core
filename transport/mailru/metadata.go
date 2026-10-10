@@ -14,11 +14,23 @@ import (
 )
 
 func (t *MailruDocsTransport) fetchDocInfo(weblink string) (MailruDocsInfo, error) {
+	// Serialize cache misses for this profile only. Never share JWTs/cookies
+	// between profiles, and never persist rejected metadata.
+	t.cacheMu.Lock()
+	defer t.cacheMu.Unlock()
+	if time.Now().Before(t.cacheUntil) {
+		return t.cachedInfo, nil
+	}
 	t.jarMu.RLock()
 	jar := t.cookieJar
 	t.jarMu.RUnlock()
 	client := &http.Client{Jar: jar, Timeout: 15 * time.Second}
-	return t.fetchDocInfoFrom(client, "https://cloud.mail.ru/api/v4/r7/edit", weblink)
+	info, err := t.fetchDocInfoFrom(client, "https://cloud.mail.ru/api/v4/r7/edit", weblink)
+	if err == nil {
+		t.cachedInfo = info
+		t.cacheUntil = mailruMetadataCacheDeadline(info.Token, time.Now())
+	}
+	return info, err
 }
 
 func (t *MailruDocsTransport) fetchDocInfoFrom(client *http.Client, apiURL, weblink string) (MailruDocsInfo, error) {

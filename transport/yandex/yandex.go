@@ -497,7 +497,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			EnableCompression: configuredWebSocketCompression,
 		}
 		headers := http.Header{}
-		headers.Set("User-Agent", "Mozilla/5.0")
+		headers.Set("User-Agent", SessionUserAgent)
 		headers.Set("Origin", info.Origin)
 		headers.Set("Cookie", info.CookieStr)
 		headers.Set("Host", info.Host)

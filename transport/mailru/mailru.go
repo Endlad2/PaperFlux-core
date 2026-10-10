@@ -6,6 +6,7 @@
 package mailru
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -56,12 +57,14 @@ type MailruDocsInfo struct {
 }
 
 type DocSession struct {
-	Info        MailruDocsInfo
-	Conn        *websocket.Conn
-	WriteQueue  chan []byte
-	UserID      string
-	writeMu     sync.Mutex
-	readTimeout time.Duration // Negotiated before publication; reader-owned.
+	Info          MailruDocsInfo
+	Conn          *websocket.Conn
+	WriteQueue    chan []byte
+	UserID        string
+	writeMu       sync.Mutex
+	readTimeout   time.Duration // Negotiated before publication; reader-owned.
+	authDeadline  time.Time     // Fixed before publication; heartbeat must not extend authentication.
+	authenticated atomic.Bool
 }
 
 func mailruReadTimeout(open string) time.Duration {
@@ -86,10 +89,14 @@ func (s *DocSession) readMessage() (int, []byte, error) {
 	if budget <= 0 {
 		budget = 90 * time.Second
 	}
-	if err := s.Conn.SetReadDeadline(time.Now().Add(budget)); err != nil {
+	deadline := time.Now().Add(budget)
+	if !s.authenticated.Load() && !s.authDeadline.IsZero() && s.authDeadline.Before(deadline) {
+		deadline = s.authDeadline
+	}
+	if err := s.Conn.SetReadDeadline(deadline); err != nil {
 		return 0, nil, err
 	}
-	return s.Conn.ReadMessage()
+	return readMailruFrame(s.Conn, maxMailruEditorFrameBytes)
 }
 
 func (s *DocSession) safeWrite(messageType int, data []byte) error {
@@ -123,7 +130,7 @@ func waitMailruSocketIO(session *DocSession, token string) error {
 
 	waitFor := func(match func(string) bool) error {
 		for {
-			messageType, payload, err := conn.ReadMessage()
+			messageType, payload, err := readMailruFrame(conn, maxMailruEditorFrameBytes)
 			if err != nil {
 				return err
 			}
@@ -204,6 +211,9 @@ type MailruDocsTransport struct {
 	jarMu                sync.RWMutex
 	cookieSaver          func(map[string]string) error
 	metadataMu           sync.Mutex
+	cacheMu              sync.Mutex
+	cachedInfo           MailruDocsInfo
+	cacheUntil           time.Time
 	verificationRetryAt  time.Time
 	verificationFailures int
 
@@ -295,6 +305,28 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 				utils.Debugf("[PANIC] recovered in mailru.connect: %v", r)
 			}
 		}()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-t.Done():
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		release, gateErr := mailruProviderGate.acquire(ctx)
+		if gateErr != nil {
+			return
+		}
+		// Release on every failure, before reconnect backoff, not after it.
+		released := false
+		releaseSlot := func() {
+			if !released {
+				release()
+				released = true
+			}
+		}
+		defer releaseSlot()
 		t.Mu.Lock()
 		existingSession := t.session
 		t.Mu.Unlock()
@@ -309,6 +341,10 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 
 		info, err := t.fetchDocInfo(t.weblink)
 		if err != nil {
+			var limited *mailruVerificationError
+			if errors.As(err, &limited) {
+				mailruProviderGate.rejected(http.StatusTooManyRequests, fmt.Sprintf("%d", int(limited.RetryAfter.Seconds())), time.Now())
+			}
 			utils.Debugf("[M-DOCS] fetchDocInfo failed: %v", err)
 			if mailruThrottled("m-docs.fetch", time.Minute) {
 				var verification *mailruVerificationError
@@ -318,33 +354,41 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 					utils.Infof("[M-DOCS] cannot open the document; retrying")
 				}
 			}
+			releaseSlot()
 			t.scheduleReconnect(attempt)
 			return
 		}
 
-		dialer := websocket.Dialer{
-			HandshakeTimeout: 15 * time.Second,
-			NetDialContext: netbind.Wrap(&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-		}
+		dialer := newMailruWebSocketDialer()
 		headers := http.Header{}
 		headers.Set("User-Agent", mailruUserAgent)
 		headers.Set("Origin", "https://docs.datacloudmail.ru")
 
 		utils.Debugf("[M-DOCS] WebSocket dial")
-		conn, resp, err := dialer.Dial(info.WsURL, headers)
+		conn, resp, err := dialer.DialContext(ctx, info.WsURL, headers)
 		if err != nil {
 			status := 0
 			if resp != nil {
 				status = resp.StatusCode
+				mailruProviderGate.rejected(status, resp.Header.Get("Retry-After"), time.Now())
+				if resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+			}
+			if status == 401 || status == 403 || status == 409 {
+				t.invalidateMetadata()
 			}
 			utils.Infof("[M-DOCS] WebSocket dial failed (http %d); retrying", status)
+			releaseSlot()
 			t.scheduleReconnect(attempt)
 			return
 		}
 		utils.Debugf("[M-DOCS] WebSocket connected")
+		releaseSlot()
+		// Negotiate the extension required by the editor gateway, and decode
+		// compressed server frames. Do not compress our cursor/packet writes:
+		// this preserves the existing fast path and avoids CPU/latency costs.
+		conn.EnableWriteCompression(false)
 
 		conn.SetReadLimit(maxMailruEditorFrameBytes)
 		t.Mu.RLock()
@@ -352,10 +396,11 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 		t.Mu.RUnlock()
 
 		session := &DocSession{
-			Info:       info,
-			Conn:       conn,
-			WriteQueue: writeQueue,
-			UserID:     userID,
+			Info:         info,
+			Conn:         conn,
+			WriteQueue:   writeQueue,
+			UserID:       userID,
+			authDeadline: time.Now().Add(45 * time.Second),
 		}
 
 		t.Mu.Lock()
@@ -386,7 +431,7 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 		}
 		t.pending = nil
 		t.session = session
-		t.SetConnected(true)
+		t.SetConnected(false) // Socket.IO connected is not editor authorization.
 		t.Mu.Unlock()
 
 		authMsg := map[string]interface{}{
@@ -471,6 +516,14 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 	}()
 }
 
+func newMailruWebSocketDialer() websocket.Dialer {
+	return websocket.Dialer{
+		HandshakeTimeout:  15 * time.Second,
+		EnableCompression: true,
+		NetDialContext:    netbind.Wrap(&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	}
+}
+
 func (t *MailruDocsTransport) writerLoop() {
 	t.Mu.RLock()
 	queue := t.writeQueue
@@ -526,7 +579,7 @@ func (t *MailruDocsTransport) keepAliveLoop() {
 		session := t.session
 		t.Mu.Unlock()
 
-		if session != nil && session.Conn != nil {
+		if session != nil && session.Conn != nil && t.IsConnected() {
 			if err := session.safeWrite(websocket.TextMessage, []byte(keepAliveMsg)); err != nil {
 				t.writeFailures.Add(1)
 				utils.Debugf("[M-DOCS] Keep-alive failed, closing the connection to reconnect")
@@ -562,7 +615,7 @@ func (t *MailruDocsTransport) editorActivityLoop() {
 		t.Mu.RLock()
 		session := t.session
 		t.Mu.RUnlock()
-		if session == nil || session.Conn == nil {
+		if session == nil || session.Conn == nil || !t.IsConnected() {
 			continue
 		}
 
@@ -643,6 +696,15 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 	}
 	event := parseMailruEditorEvent(data)
 	switch event.Type {
+	case "connectState":
+		if event.WaitAuth && session != nil && session.Conn != nil {
+			// Complete our own co-authoring authentication lock, without saving
+			// content, deleting history, or releasing editing locks.
+			if err := session.safeWrite(websocket.TextMessage, []byte(`42["message",{"type":"unLockDocument","unlock":true,"isSave":false,"releaseLocks":false}]`)); err != nil {
+				t.retireEditorSession(session)
+			}
+		}
+		return
 	case "authChanges":
 		// We advertise supportAuthChangesAck, so every history chunk needs
 		// acknowledgement before the editor can finish authentication.
@@ -655,6 +717,7 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 	case "disconnectReason", "error", "drop":
 		utils.Infof("[M-DOCS] editor rejected connection (event=%s code=%d); reconnecting", event.Type, event.Code)
 		t.retireEditorSession(session)
+		t.invalidateMetadata()
 		return
 	case "auth":
 		if event.Result == nil {
@@ -663,8 +726,15 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 		if *event.Result != 1 {
 			utils.Infof("[M-DOCS] editor authentication rejected (code=%d); reconnecting", *event.Result)
 			t.retireEditorSession(session)
+			t.invalidateMetadata()
 			return
 		}
+		t.Mu.Lock()
+		if session != nil && t.session == session {
+			session.authenticated.Store(true)
+			t.SetConnected(true)
+		}
+		t.Mu.Unlock()
 		utils.Infof("[M-DOCS] Editor authentication completed")
 		return
 	}
@@ -778,6 +848,7 @@ func (t *MailruDocsTransport) ApplyCookies(values map[string]string) error {
 	if len(values) == 0 {
 		return nil
 	}
+	t.invalidateMetadata()
 	u, _ := url.Parse("https://cloud.mail.ru/")
 	jar, _ := cookiejar.New(nil)
 	cookies := make([]*http.Cookie, 0, len(values))

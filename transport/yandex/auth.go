@@ -18,6 +18,10 @@ import (
 const maxAuthHTML = 2 << 20
 const authUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Gecko/20100101 Firefox/153.0"
 
+// SessionUserAgent must match the verification WebView, metadata requests,
+// Engine.IO polling, and WebSocket handshake for the same cookie session.
+const SessionUserAgent = authUserAgent
+
 var errLoginRequired = errors.New("YANDEX_LOGIN_REQUIRED: откройте документ и подтвердите доступ")
 var errVolgaDocument = errors.New("YANDEX_VOLGA_REQUIRED: документ использует Volga, а не старый редактор")
 
