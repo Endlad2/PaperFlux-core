@@ -69,7 +69,7 @@ func (t *MailruDocsTransport) fetchDocInfoFrom(client *http.Client, apiURL, webl
 		if len(via) >= 5 || req.URL.Scheme != api.Scheme || req.URL.Host != api.Host || req.URL.User != nil {
 			return fmt.Errorf("Mail.ru API redirect rejected")
 		}
-		req.Header.Set("User-Agent", mailruUserAgent)
+		setMailruBrowserHeaders(req.Header)
 		if client.CheckRedirect != nil {
 			return client.CheckRedirect(req, via)
 		}
@@ -84,7 +84,7 @@ func (t *MailruDocsTransport) fetchDocInfoFrom(client *http.Client, apiURL, webl
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/plain, */*")
-		req.Header.Set("User-Agent", mailruUserAgent)
+		setMailruBrowserHeaders(req.Header)
 		req.Header.Set("X-Api-Version", "4")
 		req.Header.Set("Referer", fmt.Sprintf("https://cloud.mail.ru/public/%s?weblink=%s", weblink, weblink))
 		resp, err := guarded.Do(req)
@@ -92,6 +92,9 @@ func (t *MailruDocsTransport) fetchDocInfoFrom(client *http.Client, apiURL, webl
 			// URL errors can expose document links or signed challenge parameters.
 			if ctx.Err() != nil {
 				return MailruDocsInfo{}, ctx.Err()
+			}
+			if reason, _ := mailruFailureDetails(err); reason == "timeout" {
+				return MailruDocsInfo{}, fmt.Errorf("Mail.ru API timed out")
 			}
 			return MailruDocsInfo{}, fmt.Errorf("Mail.ru API connection failed")
 		}
@@ -120,7 +123,7 @@ func (t *MailruDocsTransport) fetchDocInfoFrom(client *http.Client, apiURL, webl
 			return MailruDocsInfo{}, t.deferMailruVerification(resp.Header.Get("Retry-After"))
 		}
 		if resp.StatusCode != http.StatusOK {
-			return MailruDocsInfo{}, fmt.Errorf("API returned status %d", resp.StatusCode)
+			return MailruDocsInfo{}, &mailruMetadataHTTPError{Status: resp.StatusCode, RetryAfter: resp.Header.Get("Retry-After")}
 		}
 		info, err := parseMailruDocInfo(body)
 		if err == nil {

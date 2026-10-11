@@ -34,6 +34,13 @@ import (
 // works in the upstream fix and our owner-only handshake matrix.
 const mailruUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:155.0) Gecko/20100101 Firefox/155.0"
 
+const mailruAcceptLanguage = "en-US,en;q=0.9"
+
+func setMailruBrowserHeaders(headers http.Header) {
+	headers.Set("User-Agent", mailruUserAgent)
+	headers.Set("Accept-Language", mailruAcceptLanguage)
+}
+
 var cursorPayloadRe = regexp.MustCompile(`"cursor":"[^;]+;([^"]+)"`)
 
 // saveChangesMessageTemplate — шаблон saveChanges-сообщения в формате
@@ -330,6 +337,7 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 			}
 		}
 		defer releaseSlot()
+		utils.Infof("[M-DOCS] recovery phase=connecting")
 		t.Mu.Lock()
 		existingSession := t.session
 		t.Mu.Unlock()
@@ -348,13 +356,17 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 			if errors.As(err, &limited) {
 				mailruProviderGate.rejected(http.StatusTooManyRequests, fmt.Sprintf("%d", int(limited.RetryAfter.Seconds())), time.Now())
 			}
-			utils.Debugf("[M-DOCS] fetchDocInfo failed: %v", err)
-			if mailruThrottled("m-docs.fetch", time.Minute) {
+			var apiFailure *mailruMetadataHTTPError
+			if errors.As(err, &apiFailure) {
+				mailruProviderGate.rejected(apiFailure.Status, apiFailure.RetryAfter, time.Now())
+			}
+			reason, status := mailruFailureDetails(err)
+			if mailruThrottled(fmt.Sprintf("m-docs.fetch.%s.%d", reason, status), time.Minute) {
 				var verification *mailruVerificationError
 				if errors.As(err, &verification) {
 					utils.Infof("[M-DOCS] %s", verification)
 				} else {
-					utils.Infof("[M-DOCS] cannot open the document; retrying")
+					utils.Infof("[M-DOCS] metadata failed (reason=%s http=%d); retrying", reason, status)
 				}
 			}
 			releaseSlot()
@@ -364,7 +376,7 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 
 		dialer := newMailruWebSocketDialer()
 		headers := http.Header{}
-		headers.Set("User-Agent", mailruUserAgent)
+		setMailruBrowserHeaders(headers)
 		headers.Set("Origin", "https://docs.datacloudmail.ru")
 
 		utils.Debugf("[M-DOCS] WebSocket dial")
@@ -378,7 +390,7 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 					_ = resp.Body.Close()
 				}
 			}
-			if status == 401 || status == 403 || status == 409 {
+			if mailruRefreshMetadataAfterUpgrade(status) {
 				t.invalidateMetadata()
 			}
 			utils.Infof("[M-DOCS] WebSocket dial failed (http %d); retrying", status)
@@ -415,7 +427,9 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 		t.pending = session
 		t.Mu.Unlock()
 		if err := waitMailruSocketIO(session, info.Token); err != nil {
-			utils.Infof("[M-DOCS] Socket.IO handshake failed; retrying")
+			reason, _ := mailruFailureDetails(err)
+			utils.Infof("[M-DOCS] Socket.IO handshake failed (reason=%s); retrying", reason)
+			t.invalidateMetadata()
 			t.Mu.Lock()
 			if t.pending == session {
 				t.pending = nil
@@ -490,7 +504,10 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 				if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 					utils.Infof("[M-DOCS] receive timeout; reconnecting document channel")
 				}
-				utils.Debugf("[M-DOCS] Read error")
+				var closed *websocket.CloseError
+				if errors.As(err, &closed) {
+					utils.Infof("[M-DOCS] WebSocket closed (code=%d); reconnecting", closed.Code)
+				}
 				if mailruThrottled("m-docs.drop", time.Minute) {
 					utils.Infof("[M-DOCS] connection to the document dropped; reconnecting")
 				}
@@ -592,25 +609,20 @@ func (t *MailruDocsTransport) keepAliveLoop() {
 	}
 }
 
-// editorActivityLoop периодически отправляет в документ saveChanges-сообщение
-// в формате веб-клиента Mail.ru: значения UserId/UserShortId подставляются
-// из текущей сессии, остальное — фиксированный шаблон (см.
-// saveChangesMessageTemplate). Задержка между отправками — случайная в
-// диапазоне [0.5 с, 5 с], чтобы поток выглядел как правки живого человека:
-// ровный по сути, но не метрономом. Сообщение уходит через ту же сессию, что
-// writerLoop и keepAliveLoop, и так же терпит переподключение — если сессии
-// сейчас нет, итерация просто пропускается.
-func (t *MailruDocsTransport) editorActivityLoop() {
-	const (
-		minDelay = 500 * time.Millisecond
-		maxDelay = 5 * time.Second
-	)
-	for t.IsRunning() {
-		span := int64(maxDelay - minDelay)
-		delay := minDelay + time.Duration(rand.Int63n(span+1))
+// Cursor/Engine.IO heartbeats and saveChanges do not renew the editor's idle
+// clock. Use its activity command instead of inserting synthetic document edits.
+const mailruEditorActivityInterval = 30 * time.Second
 
+func (t *MailruDocsTransport) editorActivityLoop() {
+	t.editorActivityLoopEvery(mailruEditorActivityInterval)
+}
+
+func (t *MailruDocsTransport) editorActivityLoopEvery(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for t.IsRunning() {
 		select {
-		case <-time.After(delay):
+		case <-ticker.C:
 		case <-t.Done():
 			return
 		}
@@ -618,23 +630,24 @@ func (t *MailruDocsTransport) editorActivityLoop() {
 		t.Mu.RLock()
 		session := t.session
 		t.Mu.RUnlock()
-		if session == nil || session.Conn == nil || !t.IsConnected() {
-			continue
-		}
-
-		// A link that only lets the document be read ("edit": false) is not allowed to save: the
-		// server closes the connection (no close frame) on the first saveChanges, over and over.
-		if !canEdit(session.Info.Permissions) {
-			continue
-		}
-
-		msg := buildSaveChanges(session)
-		if err := session.safeWrite(websocket.TextMessage, msg); err != nil {
-			t.writeFailures.Add(1)
-			utils.Debugf("[M-DOCS] saveChanges write error")
-			_ = session.Conn.Close()
-		}
+		t.extendEditorSession(session)
 	}
+}
+
+func (t *MailruDocsTransport) extendEditorSession(session *DocSession) bool {
+	t.Mu.RLock()
+	current := session != nil && t.session == session && t.IsConnected()
+	t.Mu.RUnlock()
+	if !current || session.Conn == nil || !session.authenticated.Load() {
+		return false
+	}
+	if err := session.safeWrite(websocket.TextMessage, []byte(`42["message",{"type":"extendSession","idletime":0}]`)); err != nil {
+		t.writeFailures.Add(1)
+		utils.Infof("[M-DOCS] editor activity write failed; reconnecting")
+		t.retireEditorSession(session)
+		return false
+	}
+	return true
 }
 
 // canEdit says whether the document may be edited through the link this session joined with.
@@ -699,6 +712,13 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 	}
 	event := parseMailruEditorEvent(data)
 	switch event.Type {
+	case "session":
+		// The editor warns before closing an idle session. Renew only a current,
+		// authenticated session; absolute expiry still requires reconnecting.
+		if event.Code == 4002 {
+			t.extendEditorSession(session)
+		}
+		return
 	case "connectState":
 		if event.WaitAuth && session != nil && session.Conn != nil {
 			// Complete our own co-authoring authentication lock, without saving
@@ -739,6 +759,7 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 		}
 		t.Mu.Unlock()
 		utils.Infof("[M-DOCS] Editor authentication completed")
+		t.extendEditorSession(session)
 		return
 	}
 
@@ -781,6 +802,7 @@ func (t *MailruDocsTransport) scheduleReconnect(attempt int) {
 		return // one is already waiting
 	}
 	d := reconnectBackoff(next)
+	utils.Infof("[M-DOCS] recovery phase=backoff delay_ms=%d", d.Milliseconds())
 	utils.Debugf("[M-DOCS] reconnecting in %v (attempt %d)", d, next)
 	select {
 	case <-time.After(d):

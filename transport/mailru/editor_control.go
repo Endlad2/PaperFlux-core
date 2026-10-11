@@ -66,6 +66,19 @@ func parseMailruEditorEvent(data []byte) mailruEditorEvent {
 	if json.Unmarshal(body[1:len(body)-1], &event) != nil {
 		return mailruEditorEvent{}
 	}
+	// ONLYOFFICE wraps session warnings in messages, unlike disconnectReason.
+	// Decode that small control envelope only: cursor/history messages may have
+	// arrays or arbitrarily large content and must not be copied into structs.
+	if event.Type == "session" && len(body) <= 16384 {
+		var warning struct {
+			Messages *struct {
+				Code int `json:"code"`
+			} `json:"messages"`
+		}
+		if json.Unmarshal(body[1:len(body)-1], &warning) == nil && warning.Messages != nil {
+			event.Code = warning.Messages.Code
+		}
+	}
 	return event
 }
 

@@ -4,9 +4,9 @@
 
 PaperFlux VPN tunnel server with Yandex Docs and Mail.ru Docs transports. Receives client traffic through a document channel and forwards it to the internet.
 
-The [0.5.20 release](https://github.com/Flofyyk/PaperFlux/releases/tag/v0.5.20) updates Mail.ru connectivity and adds Yandex Boards and MTS Link Boards transports. Use separate empty boards with guest access and update both peers. MTS Link remains experimental. [Boards setup](docs/BOARDS.md).
+The [0.5.21 release](https://github.com/Flofyyk/PaperFlux/releases/tag/v0.5.21) renews Mail.ru editor sessions and improves connection headers and recovery diagnostics. Use [Android 0.4.34](https://github.com/Flofyyk/PaperFluxAndroid/releases/tag/v0.4.34). Yandex Boards and experimental MTS Link Boards require separate empty boards with guest access. [Boards setup](docs/BOARDS.md).
 
-Use a dedicated empty document for Mail.ru: editable links receive periodic editor changes. Read-only links are accepted without those changes; connectivity still depends on the document service.
+Use a dedicated empty document for Mail.ru. Session activity is renewed without synthetic document edits. Read-only links are accepted; connectivity still depends on the document service.
 
 ## Features
 

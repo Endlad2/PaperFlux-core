@@ -52,7 +52,7 @@ func (t *MailruDocsTransport) confirmMailru429(ctx context.Context, client *http
 	if err != nil {
 		return fmt.Errorf("Mail.ru browser verification unavailable")
 	}
-	req.Header.Set("User-Agent", mailruUserAgent)
+	setMailruBrowserHeaders(req.Header)
 	req.Header.Set("Referer", page.String())
 	resp, err := confirmationClient.Do(req)
 	if err != nil {
