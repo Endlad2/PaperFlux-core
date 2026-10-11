@@ -44,6 +44,7 @@ type BatchedTransport struct {
 	lingerMs       int
 	maxBatchBytes  int
 	maxBatchCount  int
+	retryInterval  time.Duration
 
 	running    atomic.Bool
 	lifecycle  sync.Mutex
@@ -278,6 +279,9 @@ func (b *BatchedTransport) flushLoop() {
 		encoded := encodeBatch(batch)
 		deadline := time.Now().Add(10 * time.Second)
 		backoff := 25 * time.Millisecond
+		if b.retryInterval > 0 {
+			backoff = b.retryInterval
+		}
 		for b.running.Load() {
 			err := b.Transport.Send(encoded)
 			if err == nil {
@@ -296,7 +300,9 @@ func (b *BatchedTransport) flushLoop() {
 				return
 			case <-timer.C:
 			}
-			backoff = min(backoff*2, 500*time.Millisecond)
+			if b.retryInterval == 0 {
+				backoff = min(backoff*2, 500*time.Millisecond)
+			}
 		}
 	}
 }

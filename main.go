@@ -11,8 +11,10 @@ import (
 	"time"
 	"universal-bypass-tool/socks5"
 	"universal-bypass-tool/transport"
+	"universal-bypass-tool/transport/boards"
 	"universal-bypass-tool/transport/cupsonline"
 	"universal-bypass-tool/transport/mailru"
+	"universal-bypass-tool/transport/mtslink"
 	"universal-bypass-tool/transport/oneme"
 	"universal-bypass-tool/transport/profilesecure"
 	"universal-bypass-tool/transport/relayv2"
@@ -22,7 +24,7 @@ import (
 )
 
 var (
-	buildVersion = "0.5.18"
+	buildVersion = "0.5.20"
 	globalDocUrl string
 	maxToken     string
 	maxUid       string
@@ -50,7 +52,7 @@ func main() {
 	clientIPFlag := flag.String("client-ip", "10.10.10.2", "Virtual IPv4 address for this Android worker")
 	exitModeFlag := flag.String("mode", "raw", "Exit-node mode: raw or proxy")
 	tcpRecoveryFlag := flag.String("tcp-recovery", os.Getenv("PAPERFLUX_TCP_RECOVERY"), "TCP recovery: auto (classic for document transports), classic or rack")
-	transportType := flag.String("transport", "yandex", "Transport type (yandex, vyandex, cupsonline, mailru, oneme, relayv2)")
+	transportType := flag.String("transport", "yandex", "Transport type (yandex, vyandex, boards, mtslink, cupsonline, mailru, oneme, relayv2)")
 	documentURLs := flag.String("urls", "", "Comma-separated Yandex Docs URLs for parallel document lanes")
 	volgaURL := flag.String("volga-url", "", "Dedicated empty editable Yandex document for the optional Volga fallback lane")
 	relayURL := flag.String("relay-url", "", "V2 relay WebSocket URL")
@@ -204,6 +206,23 @@ func main() {
 			trans, err = profilesecure.New(mailru.NewMailruDocsTransport(globalDocUrl, config), profileID, profileToken, "mailru", *exitNode)
 			if err != nil {
 				log.Fatalf("Mail.ru profile: %v", err)
+			}
+		case "boards", "mtslink":
+			var raw transport.Transport
+			if *transportType == "boards" {
+				if !boards.ValidURL(globalDocUrl) {
+					log.Fatal("Invalid Yandex Boards URL")
+				}
+				raw = boards.NewBoardsTransport(globalDocUrl, config)
+			} else {
+				if !mtslink.ValidURL(globalDocUrl) {
+					log.Fatal("Invalid MTS Link Boards URL")
+				}
+				raw = mtslink.New(globalDocUrl, config)
+			}
+			trans, err = profilesecure.New(raw, profileID, profileToken, *transportType+":"+globalDocUrl, *exitNode)
+			if err != nil {
+				log.Fatal("Invalid boards profile credentials")
 			}
 		case "relayv2":
 			role := "client"

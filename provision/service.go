@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"universal-bypass-tool/transport/boards"
+	"universal-bypass-tool/transport/mtslink"
 )
 
 const Magic = "PFPC1"
@@ -78,11 +80,20 @@ func LoadFile(path string) ([]Profile, error) {
 		if err != nil || id < 1 || id > 41535 || len(p.Token) < 32 || len(p.Token) > 128 || seen[p.Token] || net.ParseIP(p.ClientIP).To4() == nil {
 			return nil, errors.New("invalid profile identity")
 		}
-		if p.Transport != "yandex" && p.Transport != "vyandex" && p.Transport != "cupsonline" && p.Transport != "mailru" {
+		if p.Transport != "yandex" && p.Transport != "vyandex" && p.Transport != "cupsonline" && p.Transport != "mailru" && p.Transport != "boards" && p.Transport != "mtslink" {
 			return nil, errors.New("unsupported profile transport")
 		}
 		if len(p.DocumentURLs) == 0 && p.DocumentURL == "" {
 			return nil, errors.New("profile resource is missing")
+		}
+		if p.Transport == "boards" || p.Transport == "mtslink" {
+			docs := p.DocumentURLs
+			if len(docs) == 0 {
+				docs = []string{p.DocumentURL}
+			}
+			if len(docs) != 1 || (p.Transport == "boards" && !boards.ValidURL(docs[0])) || (p.Transport == "mtslink" && !mtslink.ValidURL(docs[0])) {
+				return nil, errors.New("invalid public board resource")
+			}
 		}
 		if p.VolgaURL != "" {
 			if p.Transport != "yandex" || !volgaDocumentRE.MatchString(p.VolgaURL) || p.VolgaURL == p.DocumentURL {

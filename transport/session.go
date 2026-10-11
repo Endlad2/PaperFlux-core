@@ -26,10 +26,11 @@ import (
 // Each transport is wrapped in its own EncryptedTransport + BatchedTransport
 // inside a transportLink. The Session coordinates them.
 type Session struct {
-	mu              sync.Mutex
-	encryptionMu    sync.Mutex
-	encryptionCache map[[32]byte]encryptionKeys
-	batchByteLimit  int64
+	mu                 sync.Mutex
+	encryptionMu       sync.Mutex
+	encryptionCache    map[[32]byte]encryptionKeys
+	batchByteLimit     int64
+	batchRetryInterval time.Duration
 
 	// Handshake state, shared across all transports.
 	local            [32]byte

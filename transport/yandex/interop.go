@@ -10,7 +10,11 @@ import (
 // SolveChallenge shares the bounded, redacted PoW implementation with the
 // upstream Session transport. Interactive challenges still require the user.
 func SolveChallenge(url string, jar http.CookieJar, userAgent string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	return SolveChallengeContext(context.Background(), url, jar, userAgent)
+}
+
+func SolveChallengeContext(parent context.Context, url string, jar http.CookieJar, userAgent string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	return solveCaptcha(ctx, url, jar, userAgent)
 }

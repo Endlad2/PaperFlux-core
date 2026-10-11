@@ -17,11 +17,13 @@ import (
 	"time"
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/transport/authrelay"
+	"universal-bypass-tool/transport/boards"
 	"universal-bypass-tool/transport/control"
 	"universal-bypass-tool/transport/cupsonline"
 	"universal-bypass-tool/transport/ipc"
 	"universal-bypass-tool/transport/mailru"
 	"universal-bypass-tool/transport/manager"
+	"universal-bypass-tool/transport/mtslink"
 	"universal-bypass-tool/transport/yandex"
 	sessionYandex "universal-bypass-tool/transport/yandexsession"
 	"universal-bypass-tool/tunnel"
@@ -40,7 +42,10 @@ type sessionRuntime struct {
 	cups     *cupsonline.CupsonlineTransport
 	exit     bool
 	quiet    bool
+	provider string
 }
+
+func (s *sessionRuntime) TCPTransportProfile() string { return s.provider }
 
 func newSessionRuntime(provider string, urls []string, volgaURL string, cfg transport.TransportConfig, exit bool, ipcPath, authAddress string) (*sessionRuntime, error) {
 	return newProfileSessionRuntime(provider, urls, volgaURL, cfg, exit, ipcPath, authAddress, sessionIdentity{
@@ -114,6 +119,11 @@ func newProfileSessionRuntime(provider string, urls []string, volgaURL string, c
 		return nil, err
 	}
 	sess.SetHandshakeTimeout(5 * time.Minute)
+	if provider == "boards" && os.Getenv("PAPERFLUX_BOARDS_TCP_PRESET") != "legacy" {
+		if err := sess.SetBatchRetryInterval(10 * time.Millisecond); err != nil {
+			return nil, err
+		}
+	}
 	if identity.Quiet {
 		if err := sess.SetBatchByteLimit(256 << 10); err != nil {
 			return nil, err
@@ -121,7 +131,7 @@ func newProfileSessionRuntime(provider string, urls []string, volgaURL string, c
 	}
 	context := "paperflux-session-v1/profile/" + identity.ID
 	m := manager.New(sess, nil, identity.Token, context)
-	out := &sessionRuntime{Manager: m, session: sess, done: make(chan struct{}), exit: exit, quiet: identity.Quiet}
+	out := &sessionRuntime{Manager: m, session: sess, done: make(chan struct{}), exit: exit, quiet: identity.Quiet, provider: provider}
 	success := false
 	defer func() {
 		if !success {
@@ -174,6 +184,16 @@ func newProfileSessionRuntime(provider string, urls []string, volgaURL string, c
 			raw = out.cups
 		case "mailru":
 			raw = mailru.NewMailruDocsTransport(resource, cfg)
+		case "boards":
+			if len(urls) != 1 || !boards.ValidURL(resource) {
+				return nil, fmt.Errorf("Yandex Boards requires one public board URL")
+			}
+			raw = boards.NewBoardsTransport(resource, cfg)
+		case "mtslink":
+			if len(urls) != 1 || !mtslink.ValidURL(resource) {
+				return nil, fmt.Errorf("MTS Link requires one public board URL")
+			}
+			raw = mtslink.New(resource, cfg)
 		default:
 			return nil, fmt.Errorf("unsupported Session transport")
 		}

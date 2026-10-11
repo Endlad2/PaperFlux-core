@@ -21,9 +21,16 @@ func (f *flakyBatchTransport) Send(p []byte) error {
 	return f.fakeTransport.Send(p)
 }
 func TestBatchRetryPreservesPendingBeforeNewTrafficAndStopCancels(t *testing.T) {
+	for _, retry := range []time.Duration{0, 10 * time.Millisecond} {
+		t.Run(retry.String(), func(t *testing.T) { testBatchRetryOrderAndStop(t, retry) })
+	}
+}
+
+func testBatchRetryOrderAndStop(t *testing.T, retry time.Duration) {
 	inner := &flakyBatchTransport{}
 	inner.fail.Store(true)
 	b := NewBatchedTransport(inner)
+	b.retryInterval = retry
 	b.lingerMs = 1
 	if err := b.Start(); err != nil {
 		t.Fatal(err)

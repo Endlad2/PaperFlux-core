@@ -154,6 +154,7 @@ func authorizeWithJar(ctx context.Context, docURL string, jar http.CookieJar) (*
 	session := &http.Client{
 		Jar: jar,
 		Transport: &http.Transport{
+			DialContext:         DialCarrierNetwork,
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
 			IdleConnTimeout:     90 * time.Second,
@@ -410,6 +411,7 @@ type relayClient struct {
 
 func newRelayClient(auth *volgaAuth, cfg VolgaConfig, stats *VolgaStats) *relayClient {
 	tr := &http.Transport{
+		DialContext:         DialCarrierNetwork,
 		MaxIdleConns:        cfg.MaxIdleConns,
 		MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost,
 		IdleConnTimeout:     cfg.IdleConnTimeout,
@@ -929,6 +931,7 @@ func (w *wsListener) connectSnapshot(snapshot volgaAuthSnapshot) error {
 	header.Set("Cookie", strings.Join(cookieParts, "; "))
 
 	dialer := websocket.Dialer{
+		NetDialContext:   DialCarrierNetwork,
 		HandshakeTimeout: w.config.WSHandshakeTimeout,
 		ReadBufferSize:   64 << 10,
 		WriteBufferSize:  64 << 10,

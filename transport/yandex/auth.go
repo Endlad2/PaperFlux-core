@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 	"universal-bypass-tool/transport/yandexhosts"
@@ -17,6 +18,37 @@ import (
 
 const maxAuthHTML = 2 << 20
 const authUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Gecko/20100101 Firefox/153.0"
+
+var publicStateScript = regexp.MustCompile(`(?s)<script\b[^>]*\bid=["']store-prefetch["'][^>]*>(.*?)</script>`)
+
+// Disk can return HTTP 200 with a public-file landing page instead of an
+// editor redirect. Its structured root resource explicitly marks a required
+// login passthrough. Do not infer login from ordinary navigation links.
+func publicLandingNeedsLogin(body []byte) bool {
+	if bytesContainsClientConfig(body) {
+		return false
+	}
+	match := publicStateScript.FindSubmatch(body)
+	if len(match) != 2 {
+		return false
+	}
+	var state struct {
+		Root      string `json:"rootResourceId"`
+		Resources map[string]struct {
+			Meta struct {
+				Login bool `json:"isMandatoryLoginPassthrough"`
+			} `json:"meta"`
+		} `json:"resources"`
+	}
+	if json.Unmarshal(match[1], &state) != nil || state.Root == "" {
+		return false
+	}
+	return state.Resources[state.Root].Meta.Login
+}
+
+func bytesContainsClientConfig(body []byte) bool {
+	return strings.Contains(string(body), `id="client-config"`) || strings.Contains(string(body), `id='client-config'`)
+}
 
 var errLoginRequired = errors.New("YANDEX_LOGIN_REQUIRED: откройте документ и подтвердите доступ")
 var errVolgaDocument = errors.New("YANDEX_VOLGA_REQUIRED: документ использует Volga, а не старый редактор")
@@ -93,7 +125,8 @@ func (t *YandexDocsTransport) authDocument(rawURL string) ([]byte, *http.Respons
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	client := &http.Client{Jar: jar, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Jar: jar, Transport: CarrierHTTPTransport(), Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer client.CloseIdleConnections()
 	body, resp, err := fetchAuthPage(ctx, rawURL, client, func() error { _, e := solveCaptcha(ctx, rawURL, jar, authUserAgent); return e })
 	if errors.Is(err, errCaptchaChallenge) || errors.Is(err, errLoginRequired) {
 		t.captchaUntil.Store(time.Now().Add(10 * time.Minute).UnixNano())
@@ -149,6 +182,9 @@ func fetchAuthPage(ctx context.Context, original string, client *http.Client, so
 		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, nil, fmt.Errorf("document request returned HTTP %d", resp.StatusCode)
+		}
+		if publicLandingNeedsLogin(body) {
+			return nil, nil, errLoginRequired
 		}
 		return body, resp, nil
 	}

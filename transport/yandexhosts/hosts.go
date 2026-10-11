@@ -20,7 +20,7 @@ func Root(host string) (string, bool) {
 func DocumentHost(host string) bool {
 	host = strings.ToLower(host)
 	for _, root := range Roots() {
-		if host == "disk."+root || host == "docs."+root {
+		if host == "disk."+root || host == "docs."+root || host == "boards."+root {
 			return true
 		}
 	}

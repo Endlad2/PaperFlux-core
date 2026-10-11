@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -225,10 +224,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		// insufficient on iOS).
 		dialer := websocket.Dialer{
 			HandshakeTimeout: 15 * time.Second,
-			NetDialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
+			NetDialContext:   legacy.DialCarrierNetwork,
 		}
 		headers := http.Header{}
 		headers.Set("User-Agent", "Mozilla/5.0")
@@ -378,7 +374,7 @@ func (t *YandexDocsTransport) writerLoop() {
 		}
 
 		payload := base64.StdEncoding.EncodeToString(pending)
-		msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
+		msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"%d;%s"}]`, len(pending), payload)
 		if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
 			t.writeFailures.Add(1)
 			utils.Debugf("[YDOCS] Write error: %v", err)
@@ -795,13 +791,15 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	}
 
 	client := &http.Client{
-		Jar: jar,
+		Jar:       jar,
+		Transport: legacy.CarrierHTTPTransport(),
 		// НЕ следуем редиректам автоматически — обрабатываем вручную.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 		Timeout: 15 * time.Second,
 	}
+	defer client.CloseIdleConnections()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -835,11 +833,7 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 
 	matches := clientConfigRe.FindStringSubmatch(html)
 	if len(matches) < 2 {
-		hint := "no client-config script"
-		if strings.Contains(html, "passport") || strings.Contains(strings.ToLower(html), "login") {
-			hint = "looks like a login page (doc not public?)"
-		}
-		return YandexDocsInfo{}, fmt.Errorf("config not found: %s (status %d)", hint, resp.StatusCode)
+		return YandexDocsInfo{}, fmt.Errorf("config not found: page did not provide editor configuration (status %d)", resp.StatusCode)
 	}
 
 	var config map[string]interface{}

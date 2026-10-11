@@ -30,12 +30,14 @@ func solveCaptcha(ctx context.Context, docURL string, jar http.CookieJar, userAg
 	}
 
 	client := &http.Client{
-		Jar:     jar,
-		Timeout: 30 * time.Second,
+		Jar:       jar,
+		Transport: CarrierHTTPTransport(),
+		Timeout:   30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+	defer client.CloseIdleConnections()
 
 	captchaURL := ""
 	currentURL := docURL

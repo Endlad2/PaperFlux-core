@@ -32,6 +32,10 @@ func configuredTCPBufferRange() (int, int, int) {
 
 func configureTCPBuffers(s *stack.Stack) tcpip.Error {
 	minSize, def, maxSize := configuredTCPBufferRange()
+	return configureTCPBufferRange(s, minSize, def, maxSize)
+}
+
+func configureTCPBufferRange(s *stack.Stack, minSize, def, maxSize int) tcpip.Error {
 	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber,
 		&tcpip.TCPReceiveBufferSizeRangeOption{Min: minSize, Default: def, Max: maxSize}); err != nil {
 		return err

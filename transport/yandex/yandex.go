@@ -488,7 +488,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 
 		dialer := websocket.Dialer{
 			HandshakeTimeout: 15 * time.Second,
-			NetDialContext:   (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			NetDialContext:   DialCarrierNetwork,
 			ReadBufferSize:   512 << 10,
 			WriteBufferSize:  512 << 10,
 			// Yandex's WebSocket endpoint supports per-message deflate. This
@@ -1141,7 +1141,6 @@ func (t *YandexDocsTransport) writerLoop() {
 			// while retaining the compatible Engine.IO/Socket.IO wire format.
 			frame := yandexFramePool.Get().([]byte)
 			frame = frame[:0]
-			frame = append(frame, `42["message",{"type":"cursor","cursor":"18;`...)
 			wirePayload, sealErr := t.secure.seal(payload)
 			if sealErr != nil {
 				t.requeueBatch(encodedItems)
@@ -1149,6 +1148,7 @@ func (t *YandexDocsTransport) writerLoop() {
 				yandexFramePool.Put(frame[:0])
 				continue
 			}
+			frame = append(frame, fmt.Sprintf(`42["message",{"type":"cursor","cursor":"%d;`, len(wirePayload))...)
 			encodedLen := base64.StdEncoding.EncodedLen(len(wirePayload))
 			if cap(frame)-len(frame) < encodedLen+4 {
 				grown := make([]byte, len(frame), len(frame)+encodedLen+64)
@@ -1270,7 +1270,8 @@ func connectEngineIO(wsURL string, headers http.Header, dialer *websocket.Dialer
 			req.Header.Add(key, value)
 		}
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Transport: CarrierHTTPTransport(), Timeout: 10 * time.Second}
+	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("engine polling: %w", err)
@@ -1633,7 +1634,7 @@ func (t *YandexDocsTransport) writeSecureFrame(session *DocSession, payload []by
 	if len(payload) >= 5 && bytes.Equal(payload[:4], secureMagic) && (payload[4] == 1 || payload[4] == 2) && session.diagSecure.Add(1) <= 8 {
 		log.Printf("[PAPERFLUX] PFS2 handshake sent kind=%d bytes=%d", payload[4], len(payload))
 	}
-	frame := []byte(`42["message",{"type":"cursor","cursor":"18;` + base64.StdEncoding.EncodeToString(payload) + `"}]`)
+	frame := []byte(fmt.Sprintf(`42["message",{"type":"cursor","cursor":"%d;%s"}]`, len(payload), base64.StdEncoding.EncodeToString(payload)))
 	return session.safeWrite(websocket.TextMessage, frame)
 }
 

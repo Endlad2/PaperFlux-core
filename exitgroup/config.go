@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+	"universal-bypass-tool/transport/boards"
+	"universal-bypass-tool/transport/mtslink"
 )
 
 const MaxProfiles = 64
@@ -63,11 +65,12 @@ func (m Manifest) Validate(now time.Time) error {
 		if err != nil || !ip.Is4() || !validClientIP(ip) {
 			return errors.New("invalid virtual address")
 		}
-		if len(p.Documents) == 0 || len(p.Documents) > 2 || (p.Transport != "yandex" && p.Transport != "mailru" && p.Transport != "vyandex") || (p.Transport != "yandex" && len(p.Documents) != 1) {
+		if len(p.Documents) == 0 || len(p.Documents) > 2 || (p.Transport != "yandex" && p.Transport != "mailru" && p.Transport != "vyandex" && p.Transport != "boards" && p.Transport != "mtslink") || (p.Transport != "yandex" && len(p.Documents) != 1) {
 			return errors.New("invalid transport or document count")
 		}
 		for _, doc := range p.Documents {
-			if len(doc) > 512 || (p.Transport != "mailru" && !yandex.MatchString(doc)) || (p.Transport == "mailru" && !mailru.MatchString(doc)) || rooms[doc] {
+			valid := (p.Transport == "yandex" || p.Transport == "vyandex") && yandex.MatchString(doc) || p.Transport == "mailru" && mailru.MatchString(doc) || p.Transport == "boards" && boards.ValidURL(doc) || p.Transport == "mtslink" && mtslink.ValidURL(doc)
+			if len(doc) > 512 || !valid || rooms[doc] {
 				return errors.New("invalid or duplicate document")
 			}
 			rooms[doc] = true

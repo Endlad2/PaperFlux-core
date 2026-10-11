@@ -106,12 +106,17 @@ func NewTCPTunnelWithClientIPMode(trans transport.Transport, isExitNode bool, cl
 	}
 
 	utils.Debugf("[TUNNEL] Net stack init...")
+	boardsPolicy := boardsTCPPolicy(trans)
+	tcpFactory := tcp.NewProtocol
+	if boardsPolicy {
+		tcpFactory = tcp.NewProtocolCUBIC
+	}
 	t.gvisorStack = stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		// UDP is needed for DNS, QUIC and other datagram traffic on Android.
 		// It shares the same authenticated transport as TCP; it is not a second
 		// external proxy or a direct-network fallback.
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcpFactory, udp.NewProtocol},
 	})
 	if err := configureTCPRecovery(t.gvisorStack, tcpRecoveryEnvironment()); err != nil {
 		utils.Infof("[TUNNEL] TCP recovery configuration rejected; keeping stack default: %v", err)
@@ -119,6 +124,13 @@ func NewTCPTunnelWithClientIPMode(trans transport.Transport, isExitNode bool, cl
 
 	if err := configureTCPBuffers(t.gvisorStack); err != nil {
 		utils.Infof("[TUNNEL] TCP buffer configuration rejected: %v", err)
+	}
+	if boardsPolicy {
+		if err := configureBoardsTCP(t.gvisorStack); err != nil {
+			utils.Infof("[TUNNEL] Boards TCP configuration rejected: %v", err)
+		} else {
+			utils.Infof("[TUNNEL] Boards TCP: CUBIC, upstream buffers, classic recovery, min RTO 3s")
+		}
 	}
 
 	tunnelEP := NewTunnelLinkEndpoint()

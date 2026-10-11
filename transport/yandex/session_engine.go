@@ -25,7 +25,8 @@ func ConnectSessionEngineIO(ctx context.Context, raw string, headers http.Header
 	}
 	req.Header = headers.Clone()
 	req.Header.Del("Host")
-	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: CarrierHTTPTransport(), Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("engine polling failed: %w", safeAuthError(err))
