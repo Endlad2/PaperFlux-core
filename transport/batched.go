@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -44,6 +45,7 @@ type BatchedTransport struct {
 	lingerMs       int
 	maxBatchBytes  int
 	maxBatchCount  int
+	maxWireBytes   int
 	retryInterval  time.Duration
 
 	running    atomic.Bool
@@ -75,7 +77,7 @@ func newBatchedTransportWithBudget(inner Transport, budget int64) *BatchedTransp
 	if budget <= 0 {
 		budget = 16 << 20
 	}
-	return &BatchedTransport{
+	b := &BatchedTransport{
 		Transport:      inner,
 		queue:          make(chan []byte, batchQueueDepth),
 		queueByteLimit: budget,
@@ -86,6 +88,10 @@ func newBatchedTransportWithBudget(inner Transport, budget int64) *BatchedTransp
 		maxBatchCount:  min(envInt("OPENFLUX_BATCH_COUNT", defaultMaxBatchCount), maxFrameRecords-1),
 		stopCh:         make(chan struct{}),
 	}
+	if limit, ok := inner.(SendSizeLimiter); ok {
+		b.maxWireBytes = limit.MaxSendSize()
+	}
+	return b
 }
 
 func (b *BatchedTransport) Start() error {
@@ -140,6 +146,9 @@ func (b *BatchedTransport) Send(data []byte) error {
 	}
 	if int64(len(data)) > b.queueByteLimit {
 		return fmt.Errorf("packet exceeds batch byte budget")
+	}
+	if b.maxWireBytes > 0 && len(data)+4 > b.maxWireBytes && len(encodeBatch([][]byte{data})) > b.maxWireBytes {
+		return fmt.Errorf("single batch record exceeds carrier message budget")
 	}
 	var timer *time.Timer
 	defer func() {
@@ -276,33 +285,89 @@ func (b *BatchedTransport) flushLoop() {
 			timer.Stop()
 		}
 
-		encoded := encodeBatch(batch)
-		deadline := time.Now().Add(10 * time.Second)
-		backoff := 25 * time.Millisecond
-		if b.retryInterval > 0 {
-			backoff = b.retryInterval
-		}
-		for b.running.Load() {
-			err := b.Transport.Send(encoded)
-			if err == nil {
-				break
+		frames := encodeCarrierBatches(batch, b.maxWireBytes)
+		for _, part := range frames {
+			encoded := part.data
+			deadline := time.Now().Add(10 * time.Second)
+			backoff := 25 * time.Millisecond
+			if b.retryInterval > 0 {
+				backoff = b.retryInterval
 			}
-			b.recordSendError(err)
-			if time.Now().After(deadline) {
-				b.expired.Add(uint64(len(batch)))
-				break
-			}
-			b.retries.Add(1)
-			timer := time.NewTimer(backoff)
-			select {
-			case <-b.stopCh:
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-			if b.retryInterval == 0 {
-				backoff = min(backoff*2, 500*time.Millisecond)
+			for b.running.Load() {
+				err := b.Transport.Send(encoded)
+				if err == nil {
+					break
+				}
+				b.recordSendError(err)
+				if time.Now().After(deadline) {
+					b.expired.Add(uint64(part.records))
+					break
+				}
+				b.retries.Add(1)
+				if errors.Is(err, ErrSendQueueFull) {
+					if notifier, ok := b.Transport.(SendQueueNotifier); ok {
+						if ready := notifier.SendReady(); ready != nil {
+							timer := time.NewTimer(time.Until(deadline))
+							select {
+							case <-b.stopCh:
+								timer.Stop()
+								return
+							case <-ready:
+								timer.Stop()
+								continue
+							case <-timer.C:
+								b.expired.Add(uint64(part.records))
+							}
+							break
+						}
+					}
+				}
+				timer := time.NewTimer(backoff)
+				select {
+				case <-b.stopCh:
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+				if b.retryInterval == 0 {
+					backoff = min(backoff*2, 500*time.Millisecond)
+				}
 			}
 		}
 	}
+}
+
+type carrierBatch struct {
+	data    []byte
+	records int
+}
+
+// Split only oversized compressed batches into independently valid wire-v2
+// batches. Existing peers decode them unchanged, with the original order.
+// Checking the encoded size accounts for compression and the encryption
+// wrapper's reported overhead, not just the uncompressed packet count.
+func encodeCarrierBatches(packets [][]byte, limit int) []carrierBatch {
+	encoded := encodeBatch(packets)
+	if limit <= 0 || len(encoded) <= limit || len(packets) == 1 {
+		return []carrierBatch{{encoded, len(packets)}}
+	}
+	// Halving wastes carrier messages (six two-per-frame records became
+	// 1+2+1+2 instead of 2+2+2). Fill consecutive frames using the guaranteed
+	// uncompressed budget; encodeBatch may only reduce this size. The full
+	// compressed-batch fast path above retains large compressible bursts.
+	var frames []carrierBatch
+	for len(packets) > 0 {
+		count, size := 0, 2
+		for count < len(packets) && size+2+len(packets[count]) <= limit {
+			size += 2 + len(packets[count])
+			count++
+		}
+		if count == 0 {
+			// Send validates records that fit only after compression.
+			count = 1
+		}
+		frames = append(frames, carrierBatch{encodeBatch(packets[:count]), count})
+		packets = packets[count:]
+	}
+	return frames
 }

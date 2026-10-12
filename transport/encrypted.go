@@ -156,6 +156,20 @@ func (e *EncryptedTransport) Send(data []byte) error {
 	return e.Transport.Send(packet)
 }
 
+func (e *EncryptedTransport) MaxSendSize() int {
+	if limit, ok := e.Transport.(SendSizeLimiter); ok && limit.MaxSendSize() > 0 {
+		return max(1, limit.MaxSendSize()-encryptedHeader-e.sendAEAD.NonceSize()-e.sendAEAD.Overhead())
+	}
+	return 0
+}
+
+func (e *EncryptedTransport) SendReady() <-chan struct{} {
+	if notifier, ok := e.Transport.(SendQueueNotifier); ok {
+		return notifier.SendReady()
+	}
+	return nil
+}
+
 func (e *EncryptedTransport) Receive(callback func([]byte)) {
 	e.Transport.Receive(func(packet []byte) {
 		e.rawFrames.Add(1)

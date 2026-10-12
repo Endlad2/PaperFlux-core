@@ -6,6 +6,7 @@ import (
 	"golang.org/x/time/rate"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -107,8 +108,9 @@ func NewTCPTunnelWithClientIPMode(trans transport.Transport, isExitNode bool, cl
 
 	utils.Debugf("[TUNNEL] Net stack init...")
 	boardsPolicy := boardsTCPPolicy(trans)
+	mailruExperiment := mailruTCPExperiment(trans)
 	tcpFactory := tcp.NewProtocol
-	if boardsPolicy {
+	if boardsPolicy || mailruExperiment == "cubic" || mailruExperiment == "boost" {
 		tcpFactory = tcp.NewProtocolCUBIC
 	}
 	t.gvisorStack = stack.New(stack.Options{
@@ -132,8 +134,21 @@ func NewTCPTunnelWithClientIPMode(trans transport.Transport, isExitNode bool, cl
 			utils.Infof("[TUNNEL] Boards TCP: CUBIC, upstream buffers, classic recovery, min RTO 3s")
 		}
 	}
+	if mailruExperiment == "cubic" || mailruExperiment == "boost" {
+		if err := configureMailruTCP(t.gvisorStack); err != nil {
+			utils.Infof("[TUNNEL] Mail.ru TCP configuration rejected: %v", err)
+		} else {
+			utils.Infof("[TUNNEL] Mail.ru experiment: CUBIC, classic recovery, min RTO 3s; bounded buffers unchanged")
+		}
+	}
 
 	tunnelEP := NewTunnelLinkEndpoint()
+	if mailruExperiment == "packing" || mailruExperiment == "boost" {
+		// Two IPv4 packets + two 78-byte Session envelopes + 6-byte batch
+		// header + 33-byte AES envelope = 2995 bytes, within cursor budget.
+		// This is the internal proxy-stack MTU, not the user's Android setting.
+		tunnelEP.SetMTU(1400)
+	}
 	tunnelEP.onOutgoingPacket = func(data []byte) {
 		if isExitNode && exitMode == ExitModeProxy && t.downloadLimiter != nil && pacedPacketBytes(data) > 0 {
 			if err := t.downloadLimiter.WaitN(t.lifecycleContext, len(data)); err != nil {
@@ -464,7 +479,13 @@ func (t *TCPTunnel) ListenTCP(port uint16) (net.Listener, error) {
 }
 
 func (t *TCPTunnel) printStats() {
-	ticker := time.NewTicker(30 * time.Second)
+	interval := 30 * time.Second
+	diagnostic := false
+	if value, err := strconv.Atoi(os.Getenv("PAPERFLUX_DIAGNOSTIC_STATS_MS")); err == nil && value >= 1000 && value <= 30000 {
+		interval = time.Duration(value) * time.Millisecond
+		diagnostic = true
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -474,6 +495,11 @@ func (t *TCPTunnel) printStats() {
 		case <-ticker.C:
 		}
 		stats := t.gvisorStack.Stats()
+		if diagnostic {
+			utils.Infof("[TCP_STATS] timeouts=%d retransmits=%d fast_recovery=%d sack_recovery=%d spurious_recovery=%d mtu=%d",
+				stats.TCP.Timeouts.Value(), stats.TCP.Retransmits.Value(), stats.TCP.FastRecovery.Value(),
+				stats.TCP.SACKRecovery.Value(), stats.TCP.SpuriousRecovery.Value(), t.tunnelEP.MTU())
+		}
 		queueDepth := 0
 		if t.outboundQ != nil {
 			queueDepth = len(t.outboundQ)

@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +23,16 @@ type Transport interface {
 	IsConnected() bool
 	Stats() TransportStats
 }
+
+// SendSizeLimiter reports a carrier's per-message binary payload budget.
+// Zero means unspecified. This is not a rate limit or a wire-format change.
+type SendSizeLimiter interface{ MaxSendSize() int }
+
+// Queue-full means this Send did not accept the frame. Optional notification
+// removes polling delays without increasing storage or weakening backpressure.
+var ErrSendQueueFull = errors.New("transport write queue full")
+
+type SendQueueNotifier interface{ SendReady() <-chan struct{} }
 
 // SessionPackets is optional local metadata, not a wire-protocol change.
 // Epoch changes only after a new peer/challenge has been authenticated.

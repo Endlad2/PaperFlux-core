@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -212,6 +213,7 @@ type MailruDocsTransport struct {
 	session       *DocSession
 	pending       *DocSession
 	writeQueue    chan []byte
+	writeSpace    chan struct{}
 	writeFailures atomic.Uint64
 
 	userCounter atomic.Int32
@@ -271,6 +273,7 @@ func (t *MailruDocsTransport) Start() error {
 	t.baseUserID = randUserID()
 	t.Mu.Lock()
 	t.writeQueue = make(chan []byte, t.GetConfig().MaxQueueSize)
+	t.writeSpace = make(chan struct{}, 1)
 	t.Mu.Unlock()
 	utils.SafeGo("mailru.writer", t.writerLoop)
 	utils.SafeGo("mailru.keepAlive", t.keepAliveLoop)
@@ -281,6 +284,9 @@ func (t *MailruDocsTransport) Start() error {
 }
 
 func (t *MailruDocsTransport) Send(data []byte) error {
+	if len(data) > t.MaxSendSize() {
+		return fmt.Errorf("mailru cursor payload exceeds per-message budget")
+	}
 	if !t.IsConnected() {
 		return fmt.Errorf("transport not connected")
 	}
@@ -298,9 +304,24 @@ func (t *MailruDocsTransport) Send(data []byte) error {
 		t.RecordSend(len(data))
 		return nil
 	default:
-		return fmt.Errorf("write queue full")
+		return transport.ErrSendQueueFull
 	}
 }
+
+func (t *MailruDocsTransport) SendReady() <-chan struct{} {
+	if os.Getenv("PAPERFLUX_MAILRU_QUEUE_NOTIFY") == "legacy" {
+		return nil
+	}
+	t.Mu.RLock()
+	defer t.Mu.RUnlock()
+	return t.writeSpace
+}
+
+// A 3066-byte payload (4093 characters including the binary prefix) was
+// accepted live; 3072 bytes (4101 characters) caused ACCESS_DENIED / 4004.
+// Leave a small margin below the observed 4096-character cursor field limit.
+// Batching uses this budget before encryption; do not pace or cap throughput.
+func (*MailruDocsTransport) MaxSendSize() int { return 3000 }
 
 func (t *MailruDocsTransport) connectToDoc(attempt int) {
 	if !t.IsRunning() {
@@ -547,6 +568,7 @@ func newMailruWebSocketDialer() websocket.Dialer {
 func (t *MailruDocsTransport) writerLoop() {
 	t.Mu.RLock()
 	queue := t.writeQueue
+	space := t.writeSpace
 	t.Mu.RUnlock()
 	if queue == nil {
 		return
@@ -558,6 +580,10 @@ func (t *MailruDocsTransport) writerLoop() {
 			select {
 			case packet := <-queue:
 				pending = packet
+				select {
+				case space <- struct{}{}:
+				default:
+				}
 			case <-t.Done():
 				return
 			}

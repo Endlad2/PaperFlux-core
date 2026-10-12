@@ -30,6 +30,9 @@ type LazyProxy struct {
 	closed        bool
 	queuedBytes   int
 	queueLimit    int
+	queueSpace    chan struct{}
+	admitTimeout  time.Duration
+	queueWaits    atomic.Uint64
 	dropped       atomic.Uint64
 	invalidDrops  atomic.Uint64
 	queueDrops    atomic.Uint64
@@ -80,7 +83,7 @@ func proxyQueueBound(name string, fallback, min, max int) int {
 func NewLazyProxy(upstream transport.Transport, ip [4]byte) *LazyProxy {
 	packets := proxyQueueBound("PAPERFLUX_PROXY_QUEUE_PACKETS", 128, 128, 1024)
 	bytes := proxyQueueBound("PAPERFLUX_PROXY_QUEUE_KIB", 256, 256, 2048) << 10
-	p := &LazyProxy{upstream: upstream, ip: ip, queue: make(chan sessionPacket, packets), queueLimit: bytes, done: make(chan struct{}), stopped: make(chan struct{})}
+	p := &LazyProxy{upstream: upstream, ip: ip, queue: make(chan sessionPacket, packets), queueLimit: bytes, queueSpace: make(chan struct{}), admitTimeout: 200 * time.Millisecond, done: make(chan struct{}), stopped: make(chan struct{})}
 	p.lastActive.Store(time.Now().UnixNano())
 	if sessions, ok := upstream.(transport.SessionPackets); ok {
 		p.sessions = sessions
@@ -103,25 +106,59 @@ func (p *LazyProxy) enqueueSession(epoch uint64, data []byte) {
 		p.invalidDrops.Add(1)
 		return
 	}
-	p.gate.Lock()
-	defer p.gate.Unlock()
-	if p.closed {
-		return
+	// A Mail.ru frame may carry a burst of cursor entries. Dropping TCP/ACKs
+	// as soon as the bounded per-profile queue fills turns a temporary burst
+	// into retransmission timeouts. Backpressure only this authenticated
+	// profile's reader briefly; never hold gate while waiting for its consumer.
+	hint, ok := p.upstream.(tcpTransportProfile)
+	waitTCP := ok && hint.TCPTransportProfile() == "mailru" && len(data) >= 40 && data[9] == 6
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for {
+		p.gate.Lock()
+		if p.closed {
+			p.gate.Unlock()
+			return
+		}
+		if epoch < p.latestEpoch.Load() {
+			p.gate.Unlock()
+			p.dropped.Add(1)
+			p.staleDrops.Add(1)
+			return
+		}
+		p.latestEpoch.Store(epoch)
+		if p.queuedBytes+len(data) <= p.queueLimit && len(p.queue) < cap(p.queue) {
+			packet := append([]byte(nil), data...)
+			p.queuedBytes += len(packet)
+			p.queue <- sessionPacket{epoch: epoch, data: packet}
+			p.gate.Unlock()
+			return
+		}
+		space := p.queueSpace
+		p.gate.Unlock()
+		if !waitTCP {
+			p.dropped.Add(1)
+			p.queueDrops.Add(1)
+			return
+		}
+		if timer == nil {
+			p.queueWaits.Add(1)
+			timer = time.NewTimer(p.admitTimeout)
+		}
+		select {
+		case <-p.done:
+			return
+		case <-space:
+		case <-timer.C:
+			p.dropped.Add(1)
+			p.queueDrops.Add(1)
+			return
+		}
 	}
-	if epoch < p.latestEpoch.Load() {
-		p.dropped.Add(1)
-		p.staleDrops.Add(1)
-		return
-	}
-	p.latestEpoch.Store(epoch)
-	if p.queuedBytes+len(data) > p.queueLimit || len(p.queue) == cap(p.queue) {
-		p.dropped.Add(1)
-		p.queueDrops.Add(1)
-		return
-	}
-	packet := append([]byte(nil), data...)
-	p.queuedBytes += len(packet)
-	p.queue <- sessionPacket{epoch: epoch, data: packet}
 }
 
 func (p *LazyProxy) run() {
@@ -134,6 +171,8 @@ func (p *LazyProxy) run() {
 			data := packet.data
 			p.gate.Lock()
 			p.queuedBytes -= len(data)
+			close(p.queueSpace)
+			p.queueSpace = make(chan struct{})
 			closed := p.closed
 			p.gate.Unlock()
 			if closed {
@@ -216,6 +255,7 @@ type LazyProxyStats struct {
 	Dropped       uint64 `json:"dropped"`
 	InvalidDrops  uint64 `json:"invalidDrops,omitempty"`
 	QueueDrops    uint64 `json:"queueDrops,omitempty"`
+	QueueWaits    uint64 `json:"queueWaits,omitempty"`
 	StackCreates  uint64 `json:"stackCreates"`
 	SessionResets uint64 `json:"sessionResets"`
 	StaleDrops    uint64 `json:"staleDrops"`
@@ -225,6 +265,7 @@ func (p *LazyProxy) Snapshot() LazyProxyStats {
 	p.stackMu.Lock()
 	defer p.stackMu.Unlock()
 	result := LazyProxyStats{Active: p.stack != nil, Dropped: p.dropped.Load(), InvalidDrops: p.invalidDrops.Load(), QueueDrops: p.queueDrops.Load(), StackCreates: p.creates.Load()}
+	result.QueueWaits = p.queueWaits.Load()
 	result.SessionResets, result.StaleDrops = p.sessionResets.Load(), p.staleDrops.Load()
 	if p.stack != nil {
 		result.Flows = p.stack.ActiveFlows()
