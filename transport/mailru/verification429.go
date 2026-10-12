@@ -14,9 +14,10 @@ import (
 
 var mailru429Status = regexp.MustCompile(`\bWAF_CHECK_RESPONSE_STATUS\s*=\s*429\s*;`)
 var mailru429Key = regexp.MustCompile(`url\.searchParams\.(?:set|append)\(\s*["']key["']\s*,\s*SparkMD5\.hash\(hash429\)\s*\)`)
+var mailru429Heading = regexp.MustCompile(`(?is)<(?:title|h[12])\b[^>]*>[^<]{0,80}\b429\b[^<]{0,80}</(?:title|h[12])\s*>`)
 
 func isMailru429Page(body []byte) bool {
-	return mailru429Status.Match(body)
+	return mailru429Status.Match(body) || mailru429Heading.Match(body)
 }
 
 // Recognize one known provider instruction; never evaluate received JavaScript.

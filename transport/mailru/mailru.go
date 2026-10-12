@@ -571,9 +571,7 @@ func (t *MailruDocsTransport) writerLoop() {
 			continue
 		}
 
-		payload := base64.StdEncoding.EncodeToString(pending)
-		msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
-		if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
+		if err := session.safeWrite(websocket.TextMessage, mailruCursorMessage(pending)); err != nil {
 			t.writeFailures.Add(1)
 			utils.Debugf("[M-DOCS] Write error")
 			_ = session.Conn.Close()
@@ -587,7 +585,7 @@ func (t *MailruDocsTransport) writerLoop() {
 func (t *MailruDocsTransport) keepAliveLoop() {
 	ticker := time.NewTicker(t.GetConfig().KeepAliveInterval)
 	defer ticker.Stop()
-	keepAliveMsg := `42["message",{"type":"cursor","cursor":"18;---KA---"}]`
+	keepAliveMsg := mailruCursorMessage([]byte("---KA---"))
 
 	for t.IsRunning() {
 		select {
@@ -600,7 +598,7 @@ func (t *MailruDocsTransport) keepAliveLoop() {
 		t.Mu.Unlock()
 
 		if session != nil && session.Conn != nil && t.IsConnected() {
-			if err := session.safeWrite(websocket.TextMessage, []byte(keepAliveMsg)); err != nil {
+			if err := session.safeWrite(websocket.TextMessage, keepAliveMsg); err != nil {
 				t.writeFailures.Add(1)
 				utils.Debugf("[M-DOCS] Keep-alive failed, closing the connection to reconnect")
 				_ = session.Conn.Close()
@@ -785,7 +783,7 @@ func cursorPayloads(text string) []string { return CursorPayloads(text) }
 func CursorPayloads(text string) []string {
 	var out []string
 	for _, m := range cursorPayloadRe.FindAllStringSubmatch(text, -1) {
-		if len(m) > 1 && m[1] != "---KA---" {
+		if len(m) > 1 && m[1] != "---KA---" && m[1] != mailruEncodedKeepAlive {
 			out = append(out, m[1])
 		}
 	}

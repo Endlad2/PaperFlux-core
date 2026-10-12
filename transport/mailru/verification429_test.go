@@ -17,6 +17,23 @@ import (
 const verificationPage = `<html><script>var WAF_CHECK_RESPONSE_STATUS = 429; url.searchParams.set('key', SparkMD5.hash(hash429));</script></html>`
 const verificationURL = "https://cloud.mail.ru/waf?hash429=hello&redirect=%2Fapi%2Fv4%2Fr7%2Fedit&sign=test-sign"
 
+func TestMailru429HtmlWithoutKnownScriptStillStopsRetries(t *testing.T) {
+	for _, body := range []string{`<!DOCTYPE html><title>Ошибка 429</title>`, `<html><h1 class="error">429 Too Many Requests</h1></html>`, verificationPage} {
+		if !isMailru429Page([]byte(body)) {
+			t.Fatal("HTML rate limit not recognized")
+		}
+	}
+	for _, body := range []string{`{"title":"Ошибка 429","document":{}}`, `<title>Document 1429</title>`, `<p>429 words</p>`} {
+		if isMailru429Page([]byte(body)) {
+			t.Fatal("ordinary content classified as rate limit")
+		}
+	}
+	page, _ := url.Parse(verificationURL)
+	if _, err := mailru429Confirmation(page, []byte(`<title>Ошибка 429</title>`)); err == nil {
+		t.Fatal("unknown confirmation protocol accepted")
+	}
+}
+
 type verificationRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f verificationRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
