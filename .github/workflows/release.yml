@@ -204,11 +204,105 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------------------
-  # 6. Create the GitHub release and attach every artifact
+  # 6. OpenWRT (armsr/armv8 via official SDK 25.12.5)
+  # ------------------------------------------------------------------
+  openwrt:
+    name: OpenWRT (armsr/armv8, musl)
+    needs: tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd curl file
+
+      - name: Cache OpenWRT SDK
+        uses: actions/cache@v4
+        with:
+          path: .cache/openwrt-sdk
+          key: openwrt-sdk-25.12.5-armsr-armv8-${{ runner.os }}-${{ hashFiles('scripts/fetch-openwrt-sdk.sh') }}
+
+      - name: Fetch and verify OpenWRT SDK
+        run: |
+          chmod +x scripts/fetch-openwrt-sdk.sh
+          ./scripts/fetch-openwrt-sdk.sh
+
+      - name: Build OpenWRT binary
+        run: |
+          set -euo pipefail
+          sdk_root=".cache/openwrt-sdk/openwrt-sdk-25.12.5-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64"
+
+          # Auto-discover the toolchain cross-compiler inside the SDK.
+          toolchain_bin=$(find "$sdk_root/staging_dir" -maxdepth 2 -type d -name 'bin' -path '*toolchain*' | head -n1)
+          if [ -z "$toolchain_bin" ]; then
+            echo "OpenWRT toolchain bin directory not found under $sdk_root/staging_dir" >&2
+            ls -la "$sdk_root/staging_dir" >&2 || true
+            exit 1
+          fi
+
+          cc=$(find "$toolchain_bin" -maxdepth 1 -type f \( -name 'aarch64-openwrt-linux-musl-gcc' -o -name 'aarch64-openwrt-linux-gcc' \) | head -n1)
+          if [ -z "$cc" ]; then
+            echo "aarch64 OpenWRT gcc not found in $toolchain_bin" >&2
+            ls -la "$toolchain_bin" >&2
+            exit 1
+          fi
+
+          echo "Using CC=$cc"
+          export STAGING_DIR="$sdk_root/staging_dir"
+          export PATH="$toolchain_bin:$PATH"
+          export GOOS=linux
+          export GOARCH=arm64
+          export CGO_ENABLED=1
+          export CC="$cc"
+          export CXX="${cc%gcc}g++"
+          export GOMIPS=softfloat
+
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.buildVersion=${{ needs.tag.outputs.tag }}" \
+            -o dist/paperflux-openwrt .
+
+          file dist/paperflux-openwrt
+
+      - name: Package OpenWRT artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Bundle the binary plus a short note so users know the target.
+          cat > dist/README-openwrt.txt <<'EOF'
+          PaperFlux for OpenWRT
+
+          Target:  armsr/armv8 (aarch64, musl libc)
+          SDK:     openwrt-sdk-25.12.5-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64
+          Binary:  paperflux-openwrt
+
+          Install: copy paperflux-openwrt to /usr/bin/paperflux and chmod +x.
+          Requires the armsr/armv8 target (e.g. an armv8 router or VM).
+          EOF
+          (cd dist && zip -r paperflux-openwrt.zip paperflux-openwrt README-openwrt.txt)
+
+      - name: Upload OpenWRT artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt
+          path: dist/paperflux-openwrt.zip
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 7. Create the GitHub release and attach every artifact
   # ------------------------------------------------------------------
   release:
     name: Create release ${{ needs.tag.outputs.tag }}
-    needs: [tag, android, ios, linux, windows]
+    needs: [tag, android, ios, linux, windows, openwrt]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
