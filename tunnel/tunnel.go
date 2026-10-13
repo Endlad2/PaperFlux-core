@@ -36,6 +36,10 @@ const (
 	ExitModeProxy
 )
 
+// DefaultExitMode applies to CLI/configuration input. Keep raw available only
+// as an explicit compatibility choice; proxy avoids the raw receive path.
+const DefaultExitMode = ExitModeProxy
+
 func (m ExitMode) String() string {
 	if m == ExitModeProxy {
 		return "proxy"
@@ -45,12 +49,14 @@ func (m ExitMode) String() string {
 
 func ParseExitMode(value string) (ExitMode, error) {
 	switch value {
-	case "", "raw":
+	case "":
+		return DefaultExitMode, nil
+	case "raw":
 		return ExitModeRaw, nil
 	case "proxy":
 		return ExitModeProxy, nil
 	default:
-		return ExitModeRaw, fmt.Errorf("unknown exit mode %q (want raw or proxy)", value)
+		return DefaultExitMode, fmt.Errorf("unknown exit mode %q (want raw or proxy)", value)
 	}
 }
 

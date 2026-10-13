@@ -50,7 +50,7 @@ func main() {
 	ipcPath := flag.String("ipc-socket", "", "Private app control socket")
 	authAddress := flag.String("auth-service", "", "Encrypted verification-only listener (exit) or address (client)")
 	clientIPFlag := flag.String("client-ip", "10.10.10.2", "Virtual IPv4 address for this Android worker")
-	exitModeFlag := flag.String("mode", "raw", "Exit-node mode: raw or proxy")
+	exitModeFlag := registerExitModeFlag(flag.CommandLine)
 	tcpRecoveryFlag := flag.String("tcp-recovery", os.Getenv("PAPERFLUX_TCP_RECOVERY"), "TCP recovery: auto (classic for document transports), classic or rack")
 	transportType := flag.String("transport", "yandex", "Transport type (yandex, vyandex, boards, mtslink, cupsonline, mailru, oneme, relayv2)")
 	documentURLs := flag.String("urls", "", "Comma-separated Yandex Docs URLs for parallel document lanes")
