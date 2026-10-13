@@ -1,0 +1,235 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Compute a single shared tag: YY.MM.DD.HH.MM
+  # ------------------------------------------------------------------
+  tag:
+    name: Compute release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - name: Generate timestamp tag
+        id: tag
+        shell: bash
+        run: |
+          TAG=$(date -u +'%y.%m.%d.%H.%M')
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+  # ------------------------------------------------------------------
+  # 2. Android (Windows runner + Android NDK)
+  # ------------------------------------------------------------------
+  android:
+    name: Android (arm64-v8a, armeabi-v7a, x86, x86_64)
+    needs: tag
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+
+      - name: Install Android NDK
+        shell: pwsh
+        run: |
+          $ndkVersion = "27.0.12077973"
+          $ndkRoot = "C:\Android\Sdk\ndk\$ndkVersion"
+          if (Test-Path $ndkRoot) {
+            Write-Host "NDK already present at $ndkRoot"
+            exit 0
+          }
+          New-Item -ItemType Directory -Force -Path "C:\Android\Sdk\ndk" | Out-Null
+          $url = "https://dl.google.com/android/repository/android-ndk-r27-windows.zip"
+          $zip = "$env:TEMP\android-ndk.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Write-Host "Extracting..."
+          Expand-Archive -Path $zip -DestinationPath "C:\Android\Sdk\ndk" -Force
+          if (Test-Path "C:\Android\Sdk\ndk\android-ndk-r27") {
+            Rename-Item "C:\Android\Sdk\ndk\android-ndk-r27" $ndkVersion
+          }
+          Remove-Item $zip -Force
+          Write-Host "NDK installed at $ndkRoot"
+
+      - name: Build Android native libraries
+        shell: pwsh
+        run: |
+          $ndkVersion = "27.0.12077973"
+          $ndkPath = "C:\Android\Sdk\ndk\$ndkVersion"
+          ./scripts/build-android-native.ps1 -NdkPath $ndkPath -Version "${{ needs.tag.outputs.tag }}" -OutputDirectory "./output/android"
+
+      - name: Package Android artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          if (Test-Path "output/android") {
+            Compress-Archive -Path "output/android/*" -DestinationPath "dist/paperflux-android.zip" -Force
+          }
+          Get-ChildItem -Recurse output/android -ErrorAction SilentlyContinue | Select-Object FullName
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/paperflux-android.zip
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 3. iOS (macOS runner + Xcode)
+  # ------------------------------------------------------------------
+  ios:
+    name: iOS (arm64 static library)
+    needs: tag
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer
+
+      - name: Build iOS static library
+        shell: bash
+        run: |
+          chmod +x build_ios.sh
+          ./build_ios.sh
+
+      - name: Package iOS artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ -d output/ios ]; then
+            (cd output/ios && zip -r ../../dist/paperflux-ios.zip .)
+          fi
+          ls -la output/ios || true
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: dist/paperflux-ios.zip
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 4. Linux (amd64 + arm64)
+  # ------------------------------------------------------------------
+  linux:
+    name: Linux (amd64, arm64)
+    needs: tag
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+
+      - name: Build Linux binary
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.buildVersion=${{ needs.tag.outputs.tag }}" \
+            -o "dist/paperflux-linux-${{ matrix.goarch }}" .
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.goarch }}
+          path: dist/paperflux-linux-${{ matrix.goarch }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 5. Windows (amd64)
+  # ------------------------------------------------------------------
+  windows:
+    name: Windows (amd64)
+    needs: tag
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+
+      - name: Build Windows binary
+        shell: pwsh
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -trimpath -ldflags "-s -w -X main.buildVersion=${{ needs.tag.outputs.tag }}" -o "dist/paperflux-windows-amd64.exe" .
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: dist/paperflux-windows-amd64.exe
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 6. Create the GitHub release and attach every artifact
+  # ------------------------------------------------------------------
+  release:
+    name: Create release ${{ needs.tag.outputs.tag }}
+    needs: [tag, android, ios, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifact layout
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f -exec cp {} release-assets/ \;
+          ls -la release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.tag.outputs.tag }}
+          name: PaperFlux ${{ needs.tag.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
