@@ -28,6 +28,10 @@ type Transport interface {
 // Zero means unspecified. This is not a rate limit or a wire-format change.
 type SendSizeLimiter interface{ MaxSendSize() int }
 
+// BatchSizeHinter supplies a carrier-specific coalescing default. Explicit
+// OPENFLUX_BATCH_BYTES still takes precedence; unrelated carriers stay unchanged.
+type BatchSizeHinter interface{ PreferredBatchBytes() int }
+
 // Queue-full means this Send did not accept the frame. Optional notification
 // removes polling delays without increasing storage or weakening backpressure.
 var ErrSendQueueFull = errors.New("transport write queue full")

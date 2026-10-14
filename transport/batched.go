@@ -77,6 +77,10 @@ func newBatchedTransportWithBudget(inner Transport, budget int64) *BatchedTransp
 	if budget <= 0 {
 		budget = 16 << 20
 	}
+	preferredBytes := defaultMaxBatchBytes
+	if hinter, ok := inner.(BatchSizeHinter); ok && hinter.PreferredBatchBytes() > 0 {
+		preferredBytes = hinter.PreferredBatchBytes()
+	}
 	b := &BatchedTransport{
 		Transport:      inner,
 		queue:          make(chan []byte, batchQueueDepth),
@@ -84,7 +88,7 @@ func newBatchedTransportWithBudget(inner Transport, budget int64) *BatchedTransp
 		queueSpace:     make(chan struct{}),
 		admitTimeout:   time.Second,
 		lingerMs:       envInt("OPENFLUX_BATCH_LINGER_MS", defaultLingerMs),
-		maxBatchBytes:  min(envInt("OPENFLUX_BATCH_BYTES", defaultMaxBatchBytes), maxFrameBytes-65537),
+		maxBatchBytes:  min(envInt("OPENFLUX_BATCH_BYTES", preferredBytes), maxFrameBytes-65537),
 		maxBatchCount:  min(envInt("OPENFLUX_BATCH_COUNT", defaultMaxBatchCount), maxFrameRecords-1),
 		stopCh:         make(chan struct{}),
 	}

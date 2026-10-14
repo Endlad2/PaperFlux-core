@@ -49,18 +49,12 @@ func TestMailruActivityOnlyForAuthenticatedCurrentSession(t *testing.T) {
 	}
 }
 
-func TestMailruActivityOnAuthAndIdleWarningOnly(t *testing.T) {
+func TestChatCarrierDoesNotSendSyntheticActivity(t *testing.T) {
 	s, received, _ := mailruTestSocket(t)
 	tr := NewMailruDocsTransport("test/doc", transport.DefaultConfig())
 	tr.session = s
 	tr.handleMessage(s, []byte(`42["message",{"type":"session","messages":{"code":4002,"reason":"idle session expires","interval":3600000}}]`))
 	tr.handleMessage(s, []byte(`42["message",{"type":"auth","result":1}]`))
-	select {
-	case frame := <-received:
-		assertActivityOnly(t, frame)
-	case <-time.After(time.Second):
-		t.Fatal("auth did not immediately renew activity")
-	}
 	for _, frame := range []string{
 		`42["other",{"type":"session","code":4002}]`,
 		`42["message",{"type":"cursor","nested":{"type":"session","code":4002}}]`,
@@ -72,14 +66,8 @@ func TestMailruActivityOnAuthAndIdleWarningOnly(t *testing.T) {
 	tr.handleMessage(&DocSession{}, []byte(`42["message",{"type":"session","code":4002}]`))
 	tr.handleMessage(s, []byte(`42["message",{"type":"session","messages":{"code":4002,"interval":3600000}}]`))
 	select {
-	case frame := <-received:
-		assertActivityOnly(t, frame)
-	case <-time.After(time.Second):
-		t.Fatal("idle warning was ignored")
-	}
-	select {
 	case <-received:
-		t.Fatal("unrelated warning extended session")
+		t.Fatal("chat carrier sent synthetic editor activity")
 	case <-time.After(20 * time.Millisecond):
 	}
 }
