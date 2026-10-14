@@ -163,6 +163,13 @@ func (e *EncryptedTransport) MaxSendSize() int {
 	return 0
 }
 
+func (e *EncryptedTransport) PreferredBatchBytes() int {
+	if hinter, ok := e.Transport.(BatchSizeHinter); ok {
+		return hinter.PreferredBatchBytes()
+	}
+	return 0
+}
+
 func (e *EncryptedTransport) SendReady() <-chan struct{} {
 	if notifier, ok := e.Transport.(SendQueueNotifier); ok {
 		return notifier.SendReady()

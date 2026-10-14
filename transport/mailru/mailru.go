@@ -272,12 +272,15 @@ func (t *MailruDocsTransport) Start() error {
 
 	t.baseUserID = randUserID()
 	t.Mu.Lock()
-	t.writeQueue = make(chan []byte, t.GetConfig().MaxQueueSize)
+	// Chat batches can be hundreds of KiB. Retaining the old 8192-message
+	// default would allow gigabytes per profile; bounded backpressure remains
+	// visible to the existing batched retry/SendReady integration.
+	t.writeQueue = make(chan []byte, max(1, min(t.GetConfig().MaxQueueSize, 2)))
 	t.writeSpace = make(chan struct{}, 1)
 	t.Mu.Unlock()
 	utils.SafeGo("mailru.writer", t.writerLoop)
-	utils.SafeGo("mailru.keepAlive", t.keepAliveLoop)
-	utils.SafeGo("mailru.editorActivity", t.editorActivityLoop)
+	// Chat mode uses Engine.IO ping/pong only, matching upstream 0.7.3.
+	// Do not send cursor/saveChanges writes that trigger editor rejection.
 	t.connectToDoc(0)
 
 	return nil
@@ -285,7 +288,7 @@ func (t *MailruDocsTransport) Start() error {
 
 func (t *MailruDocsTransport) Send(data []byte) error {
 	if len(data) > t.MaxSendSize() {
-		return fmt.Errorf("mailru cursor payload exceeds per-message budget")
+		return fmt.Errorf("mailru chat payload exceeds per-message budget")
 	}
 	if !t.IsConnected() {
 		return fmt.Errorf("transport not connected")
@@ -317,11 +320,8 @@ func (t *MailruDocsTransport) SendReady() <-chan struct{} {
 	return t.writeSpace
 }
 
-// A 3066-byte payload (4093 characters including the binary prefix) was
-// accepted live; 3072 bytes (4101 characters) caused ACCESS_DENIED / 4004.
-// Leave a small margin below the observed 4096-character cursor field limit.
-// Batching uses this budget before encryption; do not pace or cap throughput.
-func (*MailruDocsTransport) MaxSendSize() int { return 3000 }
+// Bound the chat packet independently from the editor's history read limit.
+func (*MailruDocsTransport) MaxSendSize() int { return maxMailruChatPacketBytes }
 
 func (t *MailruDocsTransport) connectToDoc(attempt int) {
 	if !t.IsRunning() {
@@ -597,7 +597,7 @@ func (t *MailruDocsTransport) writerLoop() {
 			continue
 		}
 
-		if err := session.safeWrite(websocket.TextMessage, mailruCursorMessage(pending)); err != nil {
+		if err := session.safeWrite(websocket.TextMessage, mailruChatMessage(pending)); err != nil {
 			t.writeFailures.Add(1)
 			utils.Debugf("[M-DOCS] Write error")
 			_ = session.Conn.Close()
@@ -739,9 +739,7 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 	case "session":
 		// The editor warns before closing an idle session. Renew only a current,
 		// authenticated session; absolute expiry still requires reconnecting.
-		if event.Code == 4002 {
-			t.extendEditorSession(session)
-		}
+		// No synthetic activity in the temporary upstream chat carrier.
 		return
 	case "connectState":
 		if event.WaitAuth && session != nil && session.Conn != nil {
@@ -783,11 +781,17 @@ func (t *MailruDocsTransport) handleMessage(session *DocSession, data []byte) {
 		}
 		t.Mu.Unlock()
 		utils.Infof("[M-DOCS] Editor authentication completed")
-		t.extendEditorSession(session)
 		return
 	}
 
-	if strings.Contains(text, "cursor") {
+	if event.Type == "message" && session != nil {
+		for _, decoded := range decodeChatData(data, session.Info.EditorUserID) {
+			t.RecordReceive(len(decoded))
+			t.CallReceive(decoded)
+		}
+	}
+	// Receive-only compatibility; chat peers never transmit legacy cursors.
+	if event.Type == "cursor" {
 		for _, base64Str := range cursorPayloads(text) {
 			decoded, err := base64.StdEncoding.DecodeString(base64Str)
 			if err != nil {
