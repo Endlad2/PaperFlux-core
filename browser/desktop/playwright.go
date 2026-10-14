@@ -27,7 +27,7 @@ import (
 
 // DesktopHeadless is the shipped default when browser.Config.Headless is left
 // at its zero value.
-const DesktopHeadless = false
+const DesktopHeadless = True
 
 // debugLog mirrors the -debug flag.
 var debugLog bool
