@@ -11,10 +11,14 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"universal-bypass-tool/browser"
+	"universal-bypass-tool/browser/desktop"
+	"universal-bypass-tool/browser/mobile"
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/transport/authrelay"
 	"universal-bypass-tool/transport/boards"
@@ -28,6 +32,35 @@ import (
 	sessionYandex "universal-bypass-tool/transport/yandexsession"
 	"universal-bypass-tool/tunnel"
 )
+
+// browserBackendInit guards one-time registration of the browser transport
+// factory. The factory is process-global because two different providers in
+// one process would be ambiguous for the browser backend.
+var browserBackendInit sync.Once
+
+// initBrowserBackend wires the browser package to the concrete desktop and
+// mobile bridges. Called once per process before any session is created.
+//
+// Desktop uses Playwright directly. Mobile dials the host application over
+// the existing IPC socket (--ipc-socket) and lets Java/Swift own the WebView.
+func initBrowserBackend(ipcPath string) {
+	browserBackendInit.Do(func() {
+		browser.RegisterTransportFactory(func(cfg browser.Config, provider string, urls []string, identity browser.Identity) (transport.Transport, error) {
+			var bridge browser.Bridge
+			isMobile := runtime.GOOS == "android" || runtime.GOOS == "ios"
+			if isMobile && ipcPath != "" {
+				client, err := ipc.Dial(ipcPath)
+				if err != nil {
+					return nil, fmt.Errorf("browser: dial host ipc: %w", err)
+				}
+				bridge = mobile.New(cfg, client)
+			} else {
+				bridge = desktop.New(cfg)
+			}
+			return browser.WrapBridge(bridge, cfg, provider, urls, identity), nil
+		})
+	})
+}
 
 type sessionRuntime struct {
 	*manager.Manager
@@ -167,6 +200,22 @@ func newProfileSessionRuntime(provider string, urls []string, volgaURL string, c
 		}
 		return nil
 	}
+	// Browser backend is orthogonal to the transport list: --api_type=browser
+	// replaces the raw HTTP/WebSocket carrier with a real browser for every
+	// document URL, while everything above (Session, batching, encryption)
+	// stays identical.
+	apiType := os.Getenv("PAPERFLUX_API_TYPE")
+	useBrowser := apiType == "browser"
+	if useBrowser {
+		initBrowserBackend(ipcPath)
+	}
+	browserCfg := browser.DefaultConfig()
+	browserIdentity := browser.Identity{
+		ID:        identity.ID,
+		Token:     identity.Token,
+		CookieDir: identity.CookiePath,
+		Exit:      exit,
+	}
 	for i, resource := range urls {
 		resource = strings.TrimSpace(resource)
 		if resource == "" && provider != "cupsonline" {
@@ -174,28 +223,42 @@ func newProfileSessionRuntime(provider string, urls []string, volgaURL string, c
 		}
 		name := fmt.Sprintf("%s-%d", provider, i+1)
 		var raw transport.Transport
-		switch provider {
-		case "yandex":
-			raw = sessionYandex.NewYandexDocsTransport(resource, cfg)
-		case "vyandex":
-			raw = yandex.NewYandexVolgaTransport(resource, cfg)
-		case "cupsonline":
-			out.cups = cupsonline.NewCupsonlineTransport(resource, cfg, !exit)
-			raw = out.cups
-		case "mailru":
-			raw = mailru.NewMailruDocsTransport(resource, cfg)
-		case "boards":
-			if len(urls) != 1 || !boards.ValidURL(resource) {
-				return nil, fmt.Errorf("Yandex Boards requires one public board URL")
+		if useBrowser {
+			// One browser backend per URL: the backend opens exactly one tab
+			// per URL and adopts the editor's own WebSocket in that tab.
+			browserURLs := []string{resource}
+			if provider == "cupsonline" && resource == "" {
+				return nil, fmt.Errorf("browser backend does not support empty Cups room list")
 			}
-			raw = boards.NewBoardsTransport(resource, cfg)
-		case "mtslink":
-			if len(urls) != 1 || !mtslink.ValidURL(resource) {
-				return nil, fmt.Errorf("MTS Link requires one public board URL")
+			b, err := browser.New(browserCfg, provider, browserURLs, browserIdentity)
+			if err != nil {
+				return nil, fmt.Errorf("browser backend for %s: %w", name, err)
 			}
-			raw = mtslink.New(resource, cfg)
-		default:
-			return nil, fmt.Errorf("unsupported Session transport")
+			raw = b
+		} else {
+			switch provider {
+			case "yandex":
+				raw = sessionYandex.NewYandexDocsTransport(resource, cfg)
+			case "vyandex":
+				raw = yandex.NewYandexVolgaTransport(resource, cfg)
+			case "cupsonline":
+				out.cups = cupsonline.NewCupsonlineTransport(resource, cfg, !exit)
+				raw = out.cups
+			case "mailru":
+				raw = mailru.NewMailruDocsTransport(resource, cfg)
+			case "boards":
+				if len(urls) != 1 || !boards.ValidURL(resource) {
+					return nil, fmt.Errorf("Yandex Boards requires one public board URL")
+				}
+				raw = boards.NewBoardsTransport(resource, cfg)
+			case "mtslink":
+				if len(urls) != 1 || !mtslink.ValidURL(resource) {
+					return nil, fmt.Errorf("MTS Link requires one public board URL")
+				}
+				raw = mtslink.New(resource, cfg)
+			default:
+				return nil, fmt.Errorf("unsupported Session transport")
+			}
 		}
 		if err := add(name, provider, resource, raw, 100, false); err != nil {
 			return nil, err
@@ -210,11 +273,24 @@ func newProfileSessionRuntime(provider string, urls []string, volgaURL string, c
 				return nil, fmt.Errorf("Volga fallback must not share a WebSocket document")
 			}
 		}
-		if err := add("volga-1", "vyandex", volgaURL, yandex.NewYandexVolgaTransport(volgaURL, cfg), 80, false); err != nil {
+		var volgaRaw transport.Transport
+		if useBrowser {
+			b, err := browser.New(browserCfg, "vyandex", []string{volgaURL}, browserIdentity)
+			if err != nil {
+				return nil, fmt.Errorf("browser backend for volga-1: %w", err)
+			}
+			volgaRaw = b
+		} else {
+			volgaRaw = yandex.NewYandexVolgaTransport(volgaURL, cfg)
+		}
+		if err := add("volga-1", "vyandex", volgaURL, volgaRaw, 80, false); err != nil {
 			return nil, err
 		}
 	}
-	if authAddress != "" {
+	if authAddress != "" && !useBrowser {
+		// The auth service is an encrypted verification-only channel that
+		// carries no VPN data. The browser backend already holds a real
+		// provider session, so a separate service channel is unnecessary.
 		dc := transport.DefaultDirectConfig()
 		dc.AuthSecret = identity.Token
 		dc.ReadTimeout = 45 * time.Second
@@ -262,7 +338,11 @@ func newProfileSessionRuntime(provider string, urls []string, volgaURL string, c
 	}
 	m.SetCaptchaNotifier(func(n, u, r string) { notify(n, u, r, false) })
 	m.SetRemoteAuthNotifier(func(n, u, r string) { notify(n, u, r, true) })
-	if ipcPath != "" && !exit {
+	if ipcPath != "" && !exit && !useBrowser {
+		// The IPC server is used by the Android app for cookie exchange and
+		// auth notifications. With the browser backend, the same socket is
+		// used by mobile.Bridge to control the host WebView, so the server
+		// side is not started here.
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return nil, err

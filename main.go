@@ -53,6 +53,7 @@ func main() {
 	exitModeFlag := registerExitModeFlag(flag.CommandLine)
 	tcpRecoveryFlag := flag.String("tcp-recovery", os.Getenv("PAPERFLUX_TCP_RECOVERY"), "TCP recovery: auto (classic for document transports), classic or rack")
 	transportType := flag.String("transport", "yandex", "Transport type (yandex, vyandex, boards, mtslink, cupsonline, mailru, oneme, relayv2)")
+	apiType := flag.String("api_type", "raw", "Provider API backend: raw (direct WebSocket, default) or browser (real browser via Playwright/WebView)")
 	documentURLs := flag.String("urls", "", "Comma-separated Yandex Docs URLs for parallel document lanes")
 	volgaURL := flag.String("volga-url", "", "Dedicated empty editable Yandex document for the optional Volga fallback lane")
 	relayURL := flag.String("relay-url", "", "V2 relay WebSocket URL")
@@ -72,6 +73,15 @@ func main() {
 	if *showVersion {
 		fmt.Println("PaperFlux " + buildVersion)
 		return
+	}
+	if *apiType != "raw" && *apiType != "browser" {
+		log.Fatalf("--api_type must be raw or browser, got %q", *apiType)
+	}
+	if err := os.Setenv("PAPERFLUX_API_TYPE", *apiType); err != nil {
+		log.Fatal("cannot configure API type")
+	}
+	if *apiType == "browser" {
+		log.Print("[PAPERFLUX] browser API backend selected; raw WebSocket will not be used")
 	}
 	tcpRecoveryMode, err := tunnel.ResolveTCPRecoveryMode(*tcpRecoveryFlag, *transportType)
 	if err != nil {
@@ -121,6 +131,7 @@ func main() {
 	log.Printf("=== Universal Bypass Tool ===")
 	log.Printf("Mode: %s", map[bool]string{true: "EXIT NODE", false: "CLIENT"}[*exitNode])
 	log.Printf("Transport: %s", *transportType)
+	log.Printf("API type: %s", *apiType)
 	if profileID != "" {
 		log.Printf("PaperFlux profile identity: %s", profileID)
 	}

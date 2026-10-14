@@ -1,0 +1,51 @@
+--- a/session_runtime.go
++++ b/session_runtime.go
+@@
+ import (
+ 	"crypto/rand"
+ 	"crypto/sha256"
+ 	"encoding/hex"
+ 	"encoding/json"
+ 	"fmt"
+ 	"log"
+ 	"net"
+ 	"net/url"
+ 	"os"
+ 	"regexp"
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
++	"universal-bypass-tool/browser"
++	"universal-bypass-tool/browser/desktop"
++	"universal-bypass-tool/browser/mobile"
+ 	"universal-bypass-tool/transport"
+@@
+ )
+
++// initBrowserBackend wires the browser package to the concrete desktop/mobile
++// bridges without creating an import cycle: browser/transport.go asks for a
++// factory, and this file provides it.
++func initBrowserBackend(ipcPath string) {
++	cfg := browser.DefaultConfig()
++	cfg.Headless = desktop.DesktopHeadless
++
++	// Registering twice would mean two providers in one process, which the
++	// browser backend does not support.
++	browser.RegisterTransportFactory(func(cfg browser.Config, provider string, urls []string, identity browser.Identity) (transport.Transport, error) {
++		var bridge browser.Bridge
++		if ipcPath != "" && (runtime.GOOS == "android" || runtime.GOOS == "ios") {
++			client, err := ipc.Dial(ipcPath)
++			if err != nil {
++				return nil, fmt.Errorf("browser: dial host ipc: %w", err)
++			}
++			bridge = mobile.New(cfg, client)
++		} else {
++			bridge = desktop.New(cfg)
++		}
++		return browser.WrapBridge(bridge, cfg, provider, urls, identity), nil
++	})
++}
++
+ type sessionRuntime struct {
+*** End Patch

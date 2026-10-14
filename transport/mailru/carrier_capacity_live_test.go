@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"os"
-	"strconv"
 	"testing"
 	"time"
 
@@ -37,17 +36,8 @@ func TestOwnedMailruCarrierCapacity(t *testing.T) {
 		sender = transport.NewBatchedTransport(a)
 		receiver = transport.NewBatchedTransport(b)
 	}
-	count, size := 512, 1478
-	if value, err := strconv.Atoi(os.Getenv("PAPERFLUX_CAPACITY_COUNT")); err == nil && value > 0 && value <= 1024 {
-		count = value
-	}
-	if value, err := strconv.Atoi(os.Getenv("PAPERFLUX_CAPACITY_SIZE")); err == nil && value >= 4 && value <= 65000 {
-		size = value
-	}
-	if count*size > 2<<20 {
-		t.Fatal("owned test exceeds 2 MiB budget")
-	}
-	payloads := make([][]byte, count)
+	const count, size = 512, 1478
+	var payloads [count][]byte
 	for i := range payloads {
 		payloads[i] = make([]byte, size)
 		rand.Read(payloads[i])
@@ -94,7 +84,7 @@ func TestOwnedMailruCarrierCapacity(t *testing.T) {
 				continue
 			}
 			id := binary.BigEndian.Uint32(p[:4])
-			if id < uint32(count) && bytes.Equal(p, payloads[id]) {
+			if id < count && bytes.Equal(p, payloads[id]) {
 				seen[id] = true
 			}
 		case <-timeout.C:

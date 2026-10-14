@@ -1,0 +1,18 @@
+--- a/scripts/build-android-native.ps1
++++ b/scripts/build-android-native.ps1
+@@ -14,6 +14,10 @@
+ $taskGo = (Get-Command go -ErrorAction Stop).Source
++
++# The browser backend is desktop-only. Android and iOS use the WebView bridge
++# from browser/mobile, which is pure Go and cross-compiles without a
++# browser runtime.
+ $taskTargets = @(
+@@
+     foreach ($target in $taskTargets) {
+         $env:GOOS='android'; $env:GOARCH=$target.arch; $env:CGO_ENABLED='1'
+         $env:GOARM=if ($target.arch -eq 'arm') { '7' } else { '' }
+         $env:CC=Join-Path $taskToolchain $target.compiler
++        # Exclude Playwright from the mobile build: it is a desktop backend.
++        $env:GOFLAGS="-tags=android"
+         $taskAbiOutput=New-Item -ItemType Directory -Force -Path (Join-Path $OutputDirectory $target.abi)
+*** End Patch

@@ -2,30 +2,28 @@ module universal-bypass-tool
 
 go 1.26.4
 
-require github.com/gorilla/websocket v1.5.3
-
-require gvisor.dev/gvisor v0.0.0-20260530041128-23ef90c42be7
-
 require (
-	github.com/google/btree v1.1.2 // indirect
-	golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc // indirect
-	golang.org/x/sys v0.45.0
-	golang.org/x/time v0.15.0 // indirect
-)
-
-require (
-	github.com/gopacket/gopacket v1.7.1
+	github.com/dosgo/go-tun2socks v1.2.8-0.20260112073852-83157babfa42
+	github.com/gorilla/websocket v1.5.3
+	github.com/klauspost/compress v1.20.0
+	github.com/miekg/dns v1.1.57
+	github.com/mxschmitt/playwright-go v0.6201.1
 	github.com/pierrec/lz4/v4 v4.1.27
 	github.com/pion/webrtc/v3 v3.3.6
-	github.com/wlynxg/anet v0.0.5
+	github.com/xjasonlyu/windivert-go v0.0.0-20201010013527-4239d0afa76f
+	golang.org/x/crypto v0.51.0
+	golang.org/x/net v0.55.0
+	golang.org/x/sys v0.45.0
+	golang.org/x/time v0.15.0
+	gvisor.dev/gvisor v0.0.0-20260530041128-23ef90c42be7
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/dosgo/go-tun2socks v1.2.8-0.20260112073852-83157babfa42 // indirect
+	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
+	github.com/go-stack/stack v1.8.1 // indirect
+	github.com/google/btree v1.1.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/klauspost/compress v1.20.0 // indirect
-	github.com/miekg/dns v1.1.57 // indirect
 	github.com/pion/datachannel v1.5.8 // indirect
 	github.com/pion/dtls/v2 v2.2.12 // indirect
 	github.com/pion/ice/v2 v2.3.38 // indirect
@@ -42,13 +40,11 @@ require (
 	github.com/pion/transport/v2 v2.2.10 // indirect
 	github.com/pion/turn/v2 v2.1.6 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/sensepost/godoh v0.0.0-20231219072135-f1edcfc473f4 // indirect
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8 // indirect
 	github.com/stretchr/testify v1.9.0 // indirect
-	github.com/xjasonlyu/windivert-go v0.0.0-20201010013527-4239d0afa76f // indirect
-	golang.org/x/crypto v0.51.0 // indirect
+	github.com/wlynxg/anet v0.0.5 // indirect
+	golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc // indirect
 	golang.org/x/mod v0.35.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect

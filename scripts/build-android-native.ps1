@@ -10,6 +10,12 @@ $taskNdkRoot = (Resolve-Path -LiteralPath $NdkPath).Path
 $taskToolchain = Join-Path $taskNdkRoot 'toolchains/llvm/prebuilt/windows-x86_64/bin'
 if (!(Test-Path -LiteralPath $taskToolchain)) { throw 'This script requires the Windows NDK toolchain.' }
 $taskGo = (Get-Command go -ErrorAction Stop).Source
+
+# The browser backend is desktop-only. Android and iOS use the WebView bridge
+# from browser/mobile, which is pure Go and cross-compiles without a browser
+# runtime. -tags=android keeps Playwright out of the mobile binary.
+$taskTags = 'android'
+
 $taskTargets = @(
     @{ abi='armeabi-v7a'; arch='arm'; compiler='armv7a-linux-androideabi26-clang.cmd' },
     @{ abi='arm64-v8a'; arch='arm64'; compiler='aarch64-linux-android26-clang.cmd' },
@@ -17,13 +23,14 @@ $taskTargets = @(
     @{ abi='x86_64'; arch='amd64'; compiler='x86_64-linux-android26-clang.cmd' }
 )
 $taskSavedEnv = @{}
-foreach ($name in @('GOOS','GOARCH','GOARM','CGO_ENABLED','CC')) { $taskSavedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+foreach ($name in @('GOOS','GOARCH','GOARM','CGO_ENABLED','CC','GOFLAGS')) { $taskSavedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 Push-Location $taskSourceRoot
 try {
     foreach ($target in $taskTargets) {
         $env:GOOS='android'; $env:GOARCH=$target.arch; $env:CGO_ENABLED='1'
         $env:GOARM=if ($target.arch -eq 'arm') { '7' } else { '' }
         $env:CC=Join-Path $taskToolchain $target.compiler
+        $env:GOFLAGS="-tags=$taskTags"
         $taskAbiOutput=New-Item -ItemType Directory -Force -Path (Join-Path $OutputDirectory $target.abi)
         $taskBinary=Join-Path $taskAbiOutput.FullName 'libopenflux.so'
         & $taskGo build -trimpath -buildmode=pie -ldflags "-s -w -X main.buildVersion=$Version" -o $taskBinary .
